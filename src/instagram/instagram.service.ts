@@ -127,41 +127,98 @@ export class InstagramService {
   // ─────────────────────────────────────────────
 
   private setupAxiosInterceptor() {
+    // 1. Request Interceptor: Attach proxy to specific target hosts
     axios.interceptors.request.use((config) => {
       let isInstagramScrape = false;
+      let isBtchScrape = false;
+
       if (config.url) {
         try {
           const parsed = new URL(config.url);
+          // Target 1: Direct Instagram scraping (just in case)
           isInstagramScrape =
             (parsed.hostname === 'instagram.com' || parsed.hostname === 'www.instagram.com') &&
             !config.url.includes('scontent') &&
             config.responseType !== 'stream' &&
-            config.responseType !== 'arraybuffer' &&
-            !config.proxy &&
-            !(config as any).skipInterceptor;
+            config.responseType !== 'arraybuffer';
+
+          // Target 2: btch-downloader backend (tioo.eu.org)
+          isBtchScrape = parsed.hostname.includes('tioo.eu.org');
         } catch (_) {
           isInstagramScrape =
             config.url.includes('instagram.com') &&
             !config.url.includes('jerrycoder.oggyapi.workers.dev') &&
             !config.url.includes('scontent') &&
             config.responseType !== 'stream' &&
-            config.responseType !== 'arraybuffer' &&
-            !config.proxy &&
-            !(config as any).skipInterceptor;
+            config.responseType !== 'arraybuffer';
+
+          isBtchScrape = config.url.includes('tioo.eu.org');
         }
       }
 
-      if (isInstagramScrape) {
+      const shouldProxy = (isInstagramScrape || isBtchScrape) && !config.proxy && !(config as any).skipInterceptor;
+
+      if (shouldProxy) {
         const p = this.getNextProxy();
         config.proxy = {
           host: p.host,
           port: p.port,
           auth: p.username ? { username: p.username, password: p.password } : undefined,
         };
-        this.logger.log(`[Interceptor] ${config.url} → proxy ${p.host}:${p.port}`);
+        (config as any).__isProxiedRequest = true;
+        this.logger.log(`[Interceptor] Routing ${config.url} via proxy ${p.host}:${p.port}`);
       }
       return config;
     });
+
+    // 2. Response Interceptor: Catch failures (timeout, bad proxy, 500, etc.) and retry with a new proxy
+    axios.interceptors.response.use(
+      (response) => response,
+      async (error) => {
+        const config = error.config;
+        if (!config) {
+          return Promise.reject(error);
+        }
+
+        // Initialize retry counter
+        config.__retryCount = config.__retryCount || 0;
+        const maxRetries = 3;
+
+        // Check if we can retry
+        const isJerryCoder = config.url?.includes('jerrycoder.oggyapi.workers.dev');
+        const isProxied = (config as any).__isProxiedRequest;
+
+        if ((isProxied || isJerryCoder) && config.__retryCount < maxRetries) {
+          config.__retryCount += 1;
+
+          if (isProxied) {
+            // Rotate to a new proxy for the retry
+            const p = this.getNextProxy();
+            config.proxy = {
+              host: p.host,
+              port: p.port,
+              auth: p.username ? { username: p.username, password: p.password } : undefined,
+            };
+            this.logger.warn(
+              `[Interceptor Retry] Proxied request to ${config.url} failed (${error.message}). ` +
+              `Retrying (${config.__retryCount}/${maxRetries}) using new proxy ${p.host}:${p.port}...`
+            );
+          } else if (isJerryCoder) {
+            // Wait 1.5 seconds before retrying JerryCoder API directly
+            this.logger.warn(
+              `[Interceptor Retry] JerryCoder API to ${config.url} failed (${error.message}). ` +
+              `Retrying (${config.__retryCount}/${maxRetries}) after 1.5s...`
+            );
+            await new Promise((resolve) => setTimeout(resolve, 1500));
+          }
+
+          // Re-execute request with updated config
+          return axios(config);
+        }
+
+        return Promise.reject(error);
+      }
+    );
   }
 
   // ─────────────────────────────────────────────
