@@ -368,9 +368,15 @@ export class InstagramService {
 
       this.logger.log(`[Native Scraper] Attempting GraphQL scrap (Direct connection) for shortcode: ${shortcode}...`);
       const response = await axios(axiosConfig);
-      const mediaData = response.data?.data?.xdt_shortcode_media;
+      
+      // Instagram responses can contain shortcode_media or xdt_shortcode_media depending on API context
+      const responseData = response.data?.data;
+      const mediaData = responseData?.xdt_shortcode_media || responseData?.shortcode_media;
+      
       if (!mediaData) {
-        throw new Error('GraphQL response did not return media data. Cookies might be expired or blocked.');
+        const responseKeys = JSON.stringify(Object.keys(response.data || {}));
+        const dataKeys = JSON.stringify(Object.keys(responseData || {}));
+        throw new Error(`GraphQL response did not return media data (Response keys: ${responseKeys}, Data keys: ${dataKeys}). Cookies might be expired or blocked.`);
       }
 
       const urlList: string[] = [];
@@ -385,7 +391,7 @@ export class InstagramService {
         };
       };
 
-      if (mediaData.__typename === 'XDTGraphSidecar') {
+      if (mediaData.__typename === 'XDTGraphSidecar' || mediaData.__typename === 'GraphSidecar') {
         mediaData.edge_sidecar_to_children?.edges?.forEach((edge: any) => {
           if (edge.node) {
             const detail = formatMediaDetails(edge.node);
