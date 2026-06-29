@@ -317,6 +317,18 @@ export class InstagramService {
   }
 
   /**
+   * Sanitizes cookie values automatically to prevent syntax and escape character issues.
+   * Replaces Netscape octals like \054 with literal commas, and strips double quotes/backslashes.
+   */
+  private sanitizeCookie(rawCookie: string): string {
+    if (!rawCookie) return '';
+    return rawCookie
+      .replace(/\\"/g, '')
+      .replace(/"/g, '')
+      .replace(/\\054/g, ',');
+  }
+
+  /**
    * Native custom GraphQL scraper with direct stable connection (no proxy).
    * Directly queries Instagram's GraphQL endpoint using a stable IP and account session cookie
    * to avoid 403 flags caused by rotating proxy locations.
@@ -334,7 +346,8 @@ export class InstagramService {
       return null;
     }
 
-    const cookie = cookiesList[Math.floor(Math.random() * cookiesList.length)];
+    const rawCookie = cookiesList[Math.floor(Math.random() * cookiesList.length)];
+    const cookie = this.sanitizeCookie(rawCookie);
 
     try {
       const BASE_URL = "https://www.instagram.com/graphql/query";
@@ -374,9 +387,17 @@ export class InstagramService {
       const mediaData = responseData?.xdt_shortcode_media || responseData?.shortcode_media;
       
       if (!mediaData) {
-        const responseKeys = JSON.stringify(Object.keys(response.data || {}));
+        let responseKeys = '';
+        if (response.data) {
+          if (typeof response.data === 'string') {
+            // If the response is a string/HTML, print its snippet instead of character index keys
+            responseKeys = `HTML string of length ${response.data.length} (snippet: ${response.data.substring(0, 100).replace(/\n/g, '')})`;
+          } else {
+            responseKeys = JSON.stringify(Object.keys(response.data || {}));
+          }
+        }
         const dataKeys = JSON.stringify(Object.keys(responseData || {}));
-        throw new Error(`GraphQL response did not return media data (Response keys: ${responseKeys}, Data keys: ${dataKeys}). Cookies might be expired or blocked.`);
+        throw new Error(`GraphQL response did not return media data (Response structure: ${responseKeys}, Data keys: ${dataKeys}). Cookies might be expired or blocked.`);
       }
 
       const urlList: string[] = [];
