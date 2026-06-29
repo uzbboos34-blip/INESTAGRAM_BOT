@@ -52,8 +52,8 @@ export class TelegramService implements OnModuleInit, OnModuleDestroy {
   private readonly logger = new Logger(TelegramService.name);
   private bot: Telegraf;
 
-  // Limit bot to 3 concurrent scraping/download/upload tasks at a time to prevent server/proxy overload
-  private readonly executionQueue = new TaskQueue(3);
+  // 8 concurrent tasks: mostly I/O-bound (network), safe for Render 512MB free tier
+  private readonly executionQueue = new TaskQueue(8);
 
   constructor(
     private readonly configService: ConfigService,
