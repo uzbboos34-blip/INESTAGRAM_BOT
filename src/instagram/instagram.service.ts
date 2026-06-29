@@ -41,18 +41,7 @@ export class InstagramService {
   private readonly httpAgent = new http.Agent({ keepAlive: true, maxSockets: 50 });
   private readonly httpsAgent = new https.Agent({ keepAlive: true, maxSockets: 50 });
 
-  // --- API & COOKIE ROTATION CONFIGURATION ---
-  private readonly apiUrls = [
-    'https://api1.myapp.com',
-    'https://api2.myapp.com',
-  ];
 
-  private readonly cookies = [
-    'session=abc001',
-    'session=abc002',
-  ];
-
-  private readonly usageCount = new Map<string, number>();
 
   constructor() {
     // --- GLOBAL AXIOS REQUEST INTERCEPTOR ---
@@ -194,7 +183,7 @@ export class InstagramService {
             const padLen = (4 - (normalizedBase64.length % 4)) % 4;
             const paddedBase64 = normalizedBase64 + '='.repeat(padLen);
             const jsonStr = Buffer.from(paddedBase64, 'base64').toString('utf8');
-            
+
             const sanitizedStr = jsonStr.replace(/[\x00-\x1F\x7F-\x9F]/g, (char) => {
               if (char === '\n') return '\\n';
               if (char === '\r') return '\\r';
@@ -232,7 +221,7 @@ export class InstagramService {
   ): Promise<{ success: boolean; data?: any; error?: string }> {
     try {
       this.logger.log(`[Rotator] Sending to ${apiUrl} using cookie hash (${cookie.substring(0, 15)}...)`);
-      
+
       const axiosConfig = this.getAxiosConfig({
         params: { url: instagramUrl },
         headers: { Cookie: cookie },
@@ -316,169 +305,9 @@ export class InstagramService {
     return match ? match[1] + '/' : url;
   }
 
-  /**
-   * Sanitizes cookie values automatically to prevent syntax and escape character issues.
-   * Replaces Netscape octals like \054 with literal commas, and strips double quotes/backslashes.
-   */
-  private sanitizeCookie(rawCookie: string): string {
-    if (!rawCookie) return '';
-    return rawCookie
-      .replace(/\\"/g, '')
-      .replace(/"/g, '')
-      .replace(/\\054/g, ',');
-  }
-
-  /**
-   * Native custom GraphQL scraper with direct stable connection (no proxy).
-   * Directly queries Instagram's GraphQL endpoint using a stable IP and account session cookie
-   * to avoid 403 flags caused by rotating proxy locations.
-   * Supports rotating multiple cookies using double-pipe '||' separator.
-   */
-  private async queryInstagramGraphQL(shortcode: string): Promise<InstagramMediaResponse | null> {
-    const cookieEnv = process.env.INSTAGRAM_COOKIE;
-    if (!cookieEnv || cookieEnv.trim() === '') {
-      return null;
-    }
-
-    // Split by double-pipe || to support multi-cookie rotation
-    const cookiesList = cookieEnv.split('||').map(c => c.trim()).filter(c => c.length > 0);
-    if (cookiesList.length === 0) {
-      return null;
-    }
-
-    const rawCookie = cookiesList[Math.floor(Math.random() * cookiesList.length)];
-    const cookie = this.sanitizeCookie(rawCookie);
-
-    try {
-      const BASE_URL = "https://www.instagram.com/graphql/query";
-      const INSTAGRAM_DOCUMENT_ID = "9510064595728286";
-      
-      const variables = JSON.stringify({
-        shortcode: shortcode,
-        fetch_tagged_user_count: null,
-        hoisted_comment_id: null,
-        hoisted_reply_id: null
-      });
-
-      const dataBody = new URLSearchParams();
-      dataBody.append('variables', variables);
-      dataBody.append('doc_id', INSTAGRAM_DOCUMENT_ID);
-
-      // Perform query directly (NO PROXY) using keep-alive. Set isDirectScraper to bypass the interceptor.
-      const axiosConfig = this.getDirectAxiosConfig({
-        method: 'POST',
-        url: BASE_URL,
-        isDirectScraper: true, // <-- Custom flag to bypass interceptor proxying
-        headers: {
-          'Content-Type': 'application/x-www-form-urlencoded',
-          'Cookie': cookie,
-          'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-          'X-IG-App-ID': '936619743392459',
-        },
-        data: dataBody.toString(),
-        timeout: 8000,
-      });
-
-      this.logger.log(`[Native Scraper] Attempting GraphQL scrap (Direct connection) for shortcode: ${shortcode}...`);
-      const response = await axios(axiosConfig);
-      
-      // Instagram responses can contain shortcode_media or xdt_shortcode_media depending on API context
-      const responseData = response.data?.data;
-      const mediaData = responseData?.xdt_shortcode_media || responseData?.shortcode_media;
-      
-      if (!mediaData) {
-        let responseKeys = '';
-        if (response.data) {
-          if (typeof response.data === 'string') {
-            // If the response is a string/HTML, print its snippet instead of character index keys
-            responseKeys = `HTML string of length ${response.data.length} (snippet: ${response.data.substring(0, 100).replace(/\n/g, '')})`;
-          } else {
-            responseKeys = JSON.stringify(Object.keys(response.data || {}));
-          }
-        }
-        const dataKeys = JSON.stringify(Object.keys(responseData || {}));
-        throw new Error(`GraphQL response did not return media data (Response structure: ${responseKeys}, Data keys: ${dataKeys}). Cookies might be expired or blocked.`);
-      }
-
-      const urlList: string[] = [];
-      const mediaDetails: MediaDetail[] = [];
-
-      const formatMediaDetails = (item: any): MediaDetail => {
-        const isVideo = !!item.is_video;
-        return {
-          type: isVideo ? 'video' : 'image',
-          url: this.extractDirectUrl(isVideo ? item.video_url : item.display_url),
-          thumbnail: item.display_url,
-        };
-      };
-
-      if (mediaData.__typename === 'XDTGraphSidecar' || mediaData.__typename === 'GraphSidecar') {
-        mediaData.edge_sidecar_to_children?.edges?.forEach((edge: any) => {
-          if (edge.node) {
-            const detail = formatMediaDetails(edge.node);
-            mediaDetails.push(detail);
-            urlList.push(detail.url);
-          }
-        });
-      } else {
-        const detail = formatMediaDetails(mediaData);
-        mediaDetails.push(detail);
-        urlList.push(detail.url);
-      }
-
-      this.logger.log(`[Native Scraper] Successfully scraped Reel (${shortcode}) using Session Cookie!`);
-      return {
-        results_number: urlList.length,
-        url_list: urlList,
-        media_details: mediaDetails,
-      };
-
-    } catch (err) {
-      this.logger.warn(`[Native Scraper] native GraphQL query failed: ${err.message}`);
-      return null;
-    }
-  }
 
   async getMediaUrls(url: string): Promise<InstagramMediaResponse> {
     const normalized = this.normalizeUrl(url);
-
-    // --- STEP 1: Attempt native custom GraphQL scrape with Session Cookies ---
-    const shortcodeMatch = normalized.match(/(?:p|reel|tv|reels)\/([A-Za-z0-9_-]+)/);
-    if (shortcodeMatch) {
-      const shortcode = shortcodeMatch[1];
-      const nativeResult = await this.queryInstagramGraphQL(shortcode);
-      if (nativeResult) {
-        return nativeResult;
-      }
-    }
-    
-    // --- METHOD 0: Custom API & Cookie Rotation ---
-    if (this.apiUrls.length > 0 && this.cookies.length > 0 && !this.apiUrls[0].includes('api1.myapp.com')) {
-      try {
-        this.logger.log('[Rotator] Initializing rotation run...');
-        const shuffledApis = this.getWeightedShuffled(this.apiUrls);
-        const shuffledCookies = this.getWeightedShuffled(this.cookies);
-
-        const api = shuffledApis[0];
-        const cookie = shuffledCookies[0];
-
-        this.usageCount.set(api, (this.usageCount.get(api) ?? 0) + 1);
-        this.usageCount.set(cookie, (this.usageCount.get(cookie) ?? 0) + 1);
-
-        const delay = Math.random() * 1000;
-        await new Promise(resolve => setTimeout(resolve, delay));
-
-        const response = await this.sendRotatedRequest(api, cookie, normalized);
-        if (response.success && response.data) {
-          const parsed = this.parseCustomApiResponse(response.data);
-          if (parsed) {
-            return parsed;
-          }
-        }
-      } catch (rotationErr) {
-        this.logger.warn(`[Rotator] Rotation cycle failed: ${rotationErr.message}`);
-      }
-    }
 
     // --- CONCURRENT SCRAPING RACE ENGINE ---
     this.logger.log('Launching concurrent scraper race (btch-downloader & instagram-url-direct)...');
@@ -561,7 +390,7 @@ export class InstagramService {
 
     const startDownload = Date.now();
     const bypassDirect = process.env.BYPASS_DIRECT_DOWNLOAD === 'true';
-    
+
     if (!bypassDirect) {
       try {
         const axiosConfig = this.getDirectAxiosConfig({
@@ -658,7 +487,7 @@ export class InstagramService {
         const response = await axios.get(url, axiosConfig);
         const mimeType = (response.headers['content-type'] as string) || 'video/mp4';
         const contentLength = response.headers['content-length'] as string;
-        
+
         response.data.on('end', () => {
           this.logger.log(`Instagram CDN stream completed (Direct) in ${Date.now() - startDownload}ms`);
         });
@@ -684,7 +513,7 @@ export class InstagramService {
       const response = await axios.get(url, axiosConfig);
       const mimeType = (response.headers['content-type'] as string) || 'video/mp4';
       const contentLength = response.headers['content-length'] as string;
-      
+
       response.data.on('end', () => {
         this.logger.log(`Instagram CDN stream completed (Proxy) in ${Date.now() - startProxy}ms`);
       });
@@ -706,7 +535,7 @@ export class InstagramService {
         const response = await axios.get(url, axiosConfig);
         const mimeType = (response.headers['content-type'] as string) || 'video/mp4';
         const contentLength = response.headers['content-length'] as string;
-        
+
         response.data.on('end', () => {
           this.logger.log(`Instagram CDN stream completed (Last Resort) in ${Date.now() - startLastResort}ms`);
         });
