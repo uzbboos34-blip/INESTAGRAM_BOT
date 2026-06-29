@@ -20,13 +20,13 @@
     "test:e2e": "jest --config ./test/jest-e2e.json"
   },
   "dependencies": {
+    "@jerrycoder/instagram-api": "^2.5.9",
     "@nestjs/common": "^11.0.1",
     "@nestjs/config": "^4.0.4",
     "@nestjs/core": "^11.0.1",
     "@nestjs/platform-express": "^11.0.1",
     "axios": "^1.18.1",
     "btch-downloader": "^6.0.37",
-    "instagram-url-direct": "^2.0.7",
     "pg": "^8.22.0",
     "reflect-metadata": "^0.2.2",
     "rxjs": "^7.8.1",

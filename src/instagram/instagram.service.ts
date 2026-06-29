@@ -3,9 +3,7 @@ import axios, { AxiosInstance } from 'axios';
 import * as http from 'http';
 import * as https from 'https';
 
-// eslint-disable-next-line @typescript-eslint/no-require-imports
-const { instagramGetUrl } = require('instagram-url-direct');
-
+import { instagram as jerryInstagram } from '@jerrycoder/instagram-api';
 import { igdl } from 'btch-downloader';
 
 export interface MediaDetail {
@@ -198,7 +196,32 @@ export class InstagramService {
 
     const scrapers: Promise<InstagramMediaResponse>[] = [
 
-      // ── Scraper 1: btch-downloader ──
+      // ── Scraper 1: JerryCoder API (Primary & Fastest) ──
+      (async () => {
+        try {
+          const data = await jerryInstagram(normalized);
+          if (!data || !data.url) throw new Error('jerrycoder-api: empty result');
+
+          const directUrl = this.extractDirectUrl(data.url);
+          const isVideo = data.type === 'video' || directUrl.includes('.mp4') || directUrl.toLowerCase().includes('video');
+
+          this.logger.log(`[Race] jerrycoder-api won!`);
+          return {
+            results_number: 1,
+            url_list: [directUrl],
+            media_details: [{
+              type: isVideo ? 'video' : 'image',
+              url: directUrl,
+              thumbnail: data.thumbnail
+            }]
+          };
+        } catch (err: any) {
+          this.logger.warn(`[Race] jerrycoder-api failed: ${err.message}`);
+          throw err;
+        }
+      })(),
+
+      // ── Scraper 2: btch-downloader (Secondary / Fallback) ──
       (async () => {
         try {
           const data = await igdl(normalized);
@@ -217,32 +240,6 @@ export class InstagramService {
           return { results_number: urlList.length, url_list: urlList, media_details: mediaDetails };
         } catch (err: any) {
           this.logger.warn(`[Race] btch-downloader failed: ${err.message}`);
-          throw err;
-        }
-      })(),
-
-      // ── Scraper 2: instagram-url-direct ──
-      (async () => {
-        try {
-          const data = await instagramGetUrl(normalized);
-          if (!data) throw new Error('instagram-url-direct: no data');
-
-          const rawUrls: string[] = (data.url_list || []).filter((u: string) => u?.trim());
-          const urlList = rawUrls.map((u: string) => this.extractDirectUrl(u));
-          const mediaDetails: MediaDetail[] = (data.media_details || urlList.map((u: string) => {
-            const isVideo = u.includes('.mp4') || u.toLowerCase().includes('video');
-            return { type: isVideo ? 'video' : 'image', url: u };
-          }));
-
-          if (!urlList.length && !mediaDetails.length) throw new Error('instagram-url-direct: empty result');
-          this.logger.log(`[Race] instagram-url-direct won with ${urlList.length} URL(s)`);
-          return {
-            results_number: urlList.length || mediaDetails.length,
-            url_list: urlList,
-            media_details: mediaDetails,
-          };
-        } catch (err: any) {
-          this.logger.warn(`[Race] instagram-url-direct failed: ${err.message}`);
           throw err;
         }
       })(),
