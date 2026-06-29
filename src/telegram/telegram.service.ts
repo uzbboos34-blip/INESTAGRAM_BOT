@@ -9,10 +9,51 @@ interface CachedMedia {
   fileId: string;
 }
 
+/**
+ * A lightweight, dependency-free FIFO Queue to limit concurrent download/upload executions.
+ * Protects proxy pools and Render's free tier (512MB RAM) from crashing during peak loads.
+ */
+class TaskQueue {
+  private running = 0;
+  private queue: (() => Promise<void>)[] = [];
+
+  constructor(private readonly concurrency: number) {}
+
+  run<T>(task: () => Promise<T>): Promise<T> {
+    return new Promise<T>((resolve, reject) => {
+      const runTask = async () => {
+        this.running++;
+        try {
+          const result = await task();
+          resolve(result);
+        } catch (err) {
+          reject(err);
+        } finally {
+          this.running--;
+          this.next();
+        }
+      };
+
+      this.queue.push(runTask);
+      this.next();
+    });
+  }
+
+  private next() {
+    while (this.running < this.concurrency && this.queue.length > 0) {
+      const nextTask = this.queue.shift();
+      if (nextTask) nextTask();
+    }
+  }
+}
+
 @Injectable()
 export class TelegramService implements OnModuleInit, OnModuleDestroy {
   private readonly logger = new Logger(TelegramService.name);
   private bot: Telegraf;
+
+  // Limit bot to 3 concurrent scraping/download/upload tasks at a time to prevent server/proxy overload
+  private readonly executionQueue = new TaskQueue(3);
 
   constructor(
     private readonly configService: ConfigService,
@@ -53,8 +94,11 @@ export class TelegramService implements OnModuleInit, OnModuleDestroy {
       const text = ctx.message.text.trim();
 
       if (this.instagramService.isValidUrl(text)) {
-        this.handleInstagramDownload(ctx, text).catch(err => {
-          this.logger.error(`Error handling download: ${err.message}`);
+        // Wrap the execution inside our concurrency queue to protect resources
+        this.executionQueue.run(async () => {
+          await this.handleInstagramDownload(ctx, text);
+        }).catch(err => {
+          this.logger.error(`Error handling download in queue: ${err.message}`);
         });
       } else {
         ctx.reply(
@@ -180,7 +224,7 @@ export class TelegramService implements OnModuleInit, OnModuleDestroy {
         const uploadStart = Date.now();
         let msg: any;
         
-        // Formulate stream object options with optional knownLength (improves form-data efficiency)
+        // Formulate stream object options with optional knownLength
         const sourceObj: any = {
           source: stream,
           filename: detail.filename || (realIsVideo ? 'video.mp4' : 'image.jpg'),
