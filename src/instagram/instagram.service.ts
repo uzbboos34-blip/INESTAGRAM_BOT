@@ -38,7 +38,6 @@ export class InstagramService {
   private readonly logger = new Logger(InstagramService.name);
 
   // --- KEEP-ALIVE CONNECTION AGENTS ---
-  // Reuses TCP/TLS handshakes to save 100ms - 300ms on every HTTP request
   private readonly httpAgent = new http.Agent({ keepAlive: true, maxSockets: 50 });
   private readonly httpsAgent = new https.Agent({ keepAlive: true, maxSockets: 50 });
 
@@ -46,23 +45,60 @@ export class InstagramService {
   private readonly apiUrls = [
     'https://api1.myapp.com',
     'https://api2.myapp.com',
-    // ... Add your 10 API endpoints here
   ];
 
   private readonly cookies = [
     'session=abc001',
     'session=abc002',
-    // ... Add your 30 Instagram session cookies here
   ];
 
-  private readonly MAX_PER_COOKIE = 7;
   private readonly usageCount = new Map<string, number>();
 
+  constructor() {
+    // --- GLOBAL AXIOS REQUEST INTERCEPTOR ---
+    // Intercepts and routes scraping requests from third-party libraries (like instagram-url-direct)
+    // through our rotated proxy pool to prevent Render's datacenter IP from getting banned by Instagram.
+    axios.interceptors.request.use(
+      (config) => {
+        const isScrapingRequest =
+          config.url &&
+          config.url.includes('instagram.com') &&
+          !config.url.includes('scontent') && // Ignore media downloads
+          config.responseType !== 'stream' &&
+          config.responseType !== 'arraybuffer' &&
+          !config.proxy; // Only apply if proxy is not already set
+
+        if (isScrapingRequest) {
+          const proxies = this.getProxyList();
+          if (proxies.length > 0) {
+            const selected = proxies[Math.floor(Math.random() * proxies.length)];
+            const defaultUser = process.env.PROXY_USERNAME || 'vyrysnub';
+            const defaultPass = process.env.PROXY_PASSWORD || 'm2taxn81eypu';
+
+            config.proxy = {
+              host: selected.host,
+              port: selected.port,
+            };
+
+            if (defaultUser && defaultPass) {
+              config.proxy.auth = {
+                username: defaultUser,
+                password: defaultPass,
+              };
+            }
+            this.logger.log(`[Axios Interceptor] Routed third-party scraping request to ${config.url} via proxy ${selected.host}`);
+          }
+        }
+        return config;
+      },
+      (error) => {
+        return Promise.reject(error);
+      }
+    );
+  }
+
   /**
-   * Parses the PROXY_POOL env variable or falls back to the 10 proxies from the screenshot.
-   * Supports formats:
-   * 1. host:port (uses default PROXY_USERNAME and PROXY_PASSWORD)
-   * 2. username:password@host:port (uses specific credentials)
+   * Parses the PROXY_POOL env variable or falls back to the default list.
    */
   private getProxyList(): ProxyDetails[] {
     const envPool = process.env.PROXY_POOL;
@@ -93,7 +129,6 @@ export class InstagramService {
       }
     }
 
-    // Default Webshare 10 free proxies pool from the user's screenshot
     return [
       { host: '31.59.20.176', port: 6754 },
       { host: '31.56.127.193', port: 7684 },
@@ -108,9 +143,6 @@ export class InstagramService {
     ];
   }
 
-  /**
-   * Helper to construct Axios request options with rotated proxy support (used for scraping/API calls).
-   */
   private getAxiosConfig(options: any = {}): any {
     const proxies = this.getProxyList();
     const defaultUser = process.env.PROXY_USERNAME || 'vyrysnub';
@@ -119,7 +151,6 @@ export class InstagramService {
     const config: any = { ...options };
 
     if (proxies.length > 0) {
-      // Pick a random proxy from the list for rotation
       const selected = proxies[Math.floor(Math.random() * proxies.length)];
       const username = selected.username || defaultUser;
       const password = selected.password || defaultPass;
@@ -135,16 +166,11 @@ export class InstagramService {
           password,
         };
       }
-      this.logger.log(`Routing request through rotated proxy IP: ${selected.host}:${selected.port}`);
     }
 
     return config;
   }
 
-  /**
-   * Helper to construct Axios request options WITHOUT proxy (used for downloading direct CDN URLs at maximum local speed).
-   * Employs keep-alive agents to reuse TCP connections.
-   */
   private getDirectAxiosConfig(options: any = {}): any {
     return {
       httpAgent: this.httpAgent,
@@ -153,9 +179,6 @@ export class InstagramService {
     };
   }
 
-  /**
-   * Decodes JWT token parameters from proxy CDN URLs to extract the direct public Meta CDN URL.
-   */
   extractDirectUrl(url: string): string {
     try {
       if (url && url.includes('token=')) {
@@ -170,7 +193,6 @@ export class InstagramService {
             const paddedBase64 = normalizedBase64 + '='.repeat(padLen);
             const jsonStr = Buffer.from(paddedBase64, 'base64').toString('utf8');
             
-            // Sanitize raw control characters (codes 0-31) in the JSON string
             const sanitizedStr = jsonStr.replace(/[\x00-\x1F\x7F-\x9F]/g, (char) => {
               if (char === '\n') return '\\n';
               if (char === '\r') return '\\r';
@@ -180,7 +202,6 @@ export class InstagramService {
 
             const payload = JSON.parse(sanitizedStr);
             if (payload && payload.url) {
-              this.logger.log('Successfully decoded direct Meta CDN URL from token');
               return payload.url;
             }
           }
@@ -192,9 +213,6 @@ export class InstagramService {
     return url || '';
   }
 
-  /**
-   * Simple weighted/random shuffle implementation.
-   */
   getWeightedShuffled<T>(array: T[]): T[] {
     const copy = [...array];
     for (let i = copy.length - 1; i > 0; i--) {
@@ -204,9 +222,6 @@ export class InstagramService {
     return copy;
   }
 
-  /**
-   * Sends request to a rotated API URL using a rotated Cookie.
-   */
   private async sendRotatedRequest(
     apiUrl: string,
     cookie: string,
@@ -229,7 +244,6 @@ export class InstagramService {
       this.logger.warn(`[Rotator] API ${apiUrl} failed with status ${status}: ${err.message}`);
 
       if (status === 429 && retryCount < 3) {
-        // Exponential backoff
         await new Promise(r => setTimeout(r, 500 * (retryCount + 1)));
         return this.sendRotatedRequest(apiUrl, cookie, instagramUrl, retryCount + 1);
       }
@@ -238,9 +252,6 @@ export class InstagramService {
     }
   }
 
-  /**
-   * Helper to dynamically parse diverse response formats from custom APIs.
-   */
   private parseCustomApiResponse(data: any): InstagramMediaResponse | null {
     if (!data) return null;
 
@@ -249,7 +260,6 @@ export class InstagramService {
     }
 
     if (Array.isArray(data.result)) {
-      // Filter out items with empty or invalid URLs
       const validItems = data.result.filter((item: any) => {
         const u = item.url || item;
         return typeof u === 'string' && u.trim() !== '';
@@ -293,27 +303,17 @@ export class InstagramService {
     return null;
   }
 
-  /**
-   * Checks if a string is a valid Instagram media URL.
-   */
   isValidUrl(url: string): boolean {
     if (!url) return false;
     const regex = /https?:\/\/(www\.)?instagram\.com\/(p|reel|tv|reels)\/([A-Za-z0-9_-]+)/i;
     return regex.test(url);
   }
 
-  /**
-   * Normalizes the Instagram URL.
-   */
   normalizeUrl(url: string): string {
     const match = url.match(/(https?:\/\/(www\.)?instagram\.com\/(p|reel|tv|reels)\/[A-Za-z0-9_-]+)/i);
     return match ? match[1] + '/' : url;
   }
 
-  /**
-   * Fetches direct CDN URLs using load-balancing rotation, with fallbacks to other scrapers.
-   * Optimizes scraping speed by executing all fallback scrapers concurrently using Promise.any.
-   */
   async getMediaUrls(url: string): Promise<InstagramMediaResponse> {
     const normalized = this.normalizeUrl(url);
     
@@ -327,11 +327,9 @@ export class InstagramService {
         const api = shuffledApis[0];
         const cookie = shuffledCookies[0];
 
-        // Track usage
         this.usageCount.set(api, (this.usageCount.get(api) ?? 0) + 1);
         this.usageCount.set(cookie, (this.usageCount.get(cookie) ?? 0) + 1);
 
-        // Add organic random delay (0ms - 1000ms)
         const delay = Math.random() * 1000;
         await new Promise(resolve => setTimeout(resolve, delay));
 
@@ -339,12 +337,11 @@ export class InstagramService {
         if (response.success && response.data) {
           const parsed = this.parseCustomApiResponse(response.data);
           if (parsed) {
-            this.logger.log('[Rotator] Custom API rotation succeeded!');
             return parsed;
           }
         }
       } catch (rotationErr) {
-        this.logger.warn(`[Rotator] Rotation cycle failed: ${rotationErr.message}. Falling back to standard scrapers...`);
+        this.logger.warn(`[Rotator] Rotation cycle failed: ${rotationErr.message}`);
       }
     }
 
@@ -370,7 +367,6 @@ export class InstagramService {
                   filename: (item as any).filename,
                 };
               });
-              this.logger.log('Race Winner: btch-downloader succeeded first!');
               return {
                 results_number: validResults.length,
                 url_list: urlList,
@@ -380,7 +376,6 @@ export class InstagramService {
           }
           throw new Error('btch-downloader returned empty results');
         } catch (err) {
-          this.logger.warn(`btch-downloader task in race failed: ${err.message}`);
           throw err;
         }
       })(),
@@ -402,7 +397,6 @@ export class InstagramService {
             });
 
             if (urlList.length > 0 || mediaDetails.length > 0) {
-              this.logger.log('Race Winner: instagram-url-direct succeeded first!');
               return {
                 results_number: urlList.length || mediaDetails.length,
                 url_list: urlList,
@@ -412,25 +406,19 @@ export class InstagramService {
           }
           throw new Error('instagram-url-direct returned empty results');
         } catch (err) {
-          this.logger.warn(`instagram-url-direct task in race failed: ${err.message}`);
           throw err;
         }
       })()
     ];
 
     try {
-      const fastResult = await Promise.any(scraperPromises);
-      return fastResult;
+      return await Promise.any(scraperPromises);
     } catch (error) {
       this.logger.error(`All concurrent scrapers failed for URL (${url})`);
       throw new Error('Instagram videoni yuklab bo\'lmadi. Bu video shaxsiy (private) akkauntdan olingan bo\'lishi, o\'chirilgan bo\'lishi yoki tizimda yuklanish ko\'pligi sababli bo\'lishi mumkin.');
     }
   }
 
-  /**
-   * Downloads the media buffer from the direct CDN link.
-   * Employs a dual-pipeline with Keep-Alive connection agents and diagnostic timing metrics.
-   */
   async downloadMedia(url: string): Promise<{ data: Buffer; mimeType: string }> {
     if (!url || typeof url !== 'string' || url.trim() === '') {
       throw new Error('Invalid download URL provided');
@@ -440,9 +428,7 @@ export class InstagramService {
     const bypassDirect = process.env.BYPASS_DIRECT_DOWNLOAD === 'true';
     
     if (!bypassDirect) {
-      // --- ROUTE A: Direct first (with 4s timeout), then Proxy ---
       try {
-        this.logger.log(`Attempting direct media download (no proxy) with 4s timeout...`);
         const axiosConfig = this.getDirectAxiosConfig({
           responseType: 'arraybuffer',
           timeout: 4000,
@@ -456,11 +442,8 @@ export class InstagramService {
 
         const response = await axios.get(url, axiosConfig);
         const mimeType = (response.headers['content-type'] as string) || 'video/mp4';
-        this.logger.log(`Direct media download succeeded in ${Date.now() - startDownload}ms!`);
         return { data: Buffer.from(response.data), mimeType };
       } catch (error) {
-        this.logger.warn(`Direct media download failed in ${Date.now() - startDownload}ms: ${error.message}. Switching to rotated proxy...`);
-        
         try {
           const startProxy = Date.now();
           const axiosConfig = this.getAxiosConfig({
@@ -474,18 +457,14 @@ export class InstagramService {
           });
           const response = await axios.get(url, axiosConfig);
           const mimeType = (response.headers['content-type'] as string) || 'video/mp4';
-          this.logger.log(`Proxy media download succeeded in ${Date.now() - startProxy}ms!`);
           return { data: Buffer.from(response.data), mimeType };
         } catch (proxyError) {
-          this.logger.error(`Both direct and proxy media downloads failed: ${proxyError.message}`);
           throw new Error('Could not download the video stream from Instagram servers.');
         }
       }
     } else {
-      // --- ROUTE B: Proxy first, then Direct as last resort (handles large files if proxy limits them) ---
       try {
         const startProxy = Date.now();
-        this.logger.log(`Attempting proxy media download...`);
         const axiosConfig = this.getAxiosConfig({
           responseType: 'arraybuffer',
           headers: {
@@ -497,11 +476,8 @@ export class InstagramService {
         });
         const response = await axios.get(url, axiosConfig);
         const mimeType = (response.headers['content-type'] as string) || 'video/mp4';
-        this.logger.log(`Proxy media download succeeded in ${Date.now() - startProxy}ms!`);
         return { data: Buffer.from(response.data), mimeType };
       } catch (proxyError) {
-        this.logger.warn(`Proxy media download failed: ${proxyError.message}. Trying direct download (no proxy) as a last resort...`);
-        
         try {
           const startLastResort = Date.now();
           const axiosConfig = this.getDirectAxiosConfig({
@@ -515,20 +491,14 @@ export class InstagramService {
           });
           const response = await axios.get(url, axiosConfig);
           const mimeType = (response.headers['content-type'] as string) || 'video/mp4';
-          this.logger.log(`Last-resort direct media download succeeded in ${Date.now() - startLastResort}ms!`);
           return { data: Buffer.from(response.data), mimeType };
         } catch (directError) {
-          this.logger.error(`Both proxy and last-resort direct media downloads failed: ${directError.message}`);
           throw new Error('Could not download the video stream from Instagram servers.');
         }
       }
     }
   }
 
-  /**
-   * Opens a direct readable stream from the Instagram CDN.
-   * Employs a dual-pipeline with Keep-Alive connection agents, content-length exposure, and diagnostic timing metrics.
-   */
   async downloadMediaStream(url: string): Promise<{ stream: any; mimeType: string; contentLength?: string }> {
     if (!url || typeof url !== 'string' || url.trim() === '') {
       throw new Error('Invalid streaming URL provided');
@@ -538,9 +508,7 @@ export class InstagramService {
     const bypassDirect = process.env.BYPASS_DIRECT_DOWNLOAD === 'true';
 
     if (!bypassDirect) {
-      // --- ROUTE A: Direct first (with 4s timeout), then Proxy ---
       try {
-        this.logger.log(`Attempting direct download stream (no proxy) with 4s timeout...`);
         const axiosConfig = this.getDirectAxiosConfig({
           responseType: 'stream',
           timeout: 4000,
@@ -556,22 +524,18 @@ export class InstagramService {
         const mimeType = (response.headers['content-type'] as string) || 'video/mp4';
         const contentLength = response.headers['content-length'] as string;
         
-        this.logger.log(`Instagram CDN connected (Direct). Headers received in ${Date.now() - startDownload}ms`);
-        
         response.data.on('end', () => {
           this.logger.log(`Instagram CDN stream completed (Direct) in ${Date.now() - startDownload}ms`);
         });
 
         return { stream: response.data, mimeType, contentLength };
       } catch (error) {
-        this.logger.warn(`Direct download stream failed or timed out in ${Date.now() - startDownload}ms: ${error.message}. Switching to rotated proxy...`);
+        this.logger.warn(`Direct download stream failed or timed out: ${error.message}. Switching to rotated proxy...`);
       }
     }
 
-    // --- ROUTE B/FALLBACK: Proxy first, then Direct as last resort ---
     const startProxy = Date.now();
     try {
-      this.logger.log(`Attempting proxy download stream...`);
       const axiosConfig = this.getAxiosConfig({
         responseType: 'stream',
         headers: {
@@ -586,16 +550,12 @@ export class InstagramService {
       const mimeType = (response.headers['content-type'] as string) || 'video/mp4';
       const contentLength = response.headers['content-length'] as string;
       
-      this.logger.log(`Instagram CDN connected (Proxy). Headers received in ${Date.now() - startProxy}ms`);
-      
       response.data.on('end', () => {
         this.logger.log(`Instagram CDN stream completed (Proxy) in ${Date.now() - startProxy}ms`);
       });
 
       return { stream: response.data, mimeType, contentLength };
     } catch (proxyError) {
-      this.logger.warn(`Proxy download stream failed in ${Date.now() - startProxy}ms: ${proxyError.message}. Trying direct download (no proxy) as a last resort...`);
-      
       const startLastResort = Date.now();
       try {
         const axiosConfig = this.getDirectAxiosConfig({
@@ -612,15 +572,12 @@ export class InstagramService {
         const mimeType = (response.headers['content-type'] as string) || 'video/mp4';
         const contentLength = response.headers['content-length'] as string;
         
-        this.logger.log(`Instagram CDN connected (Last Resort). Headers received in ${Date.now() - startLastResort}ms`);
-        
         response.data.on('end', () => {
           this.logger.log(`Instagram CDN stream completed (Last Resort) in ${Date.now() - startLastResort}ms`);
         });
 
         return { stream: response.data, mimeType, contentLength };
       } catch (directError) {
-        this.logger.error(`Both proxy and last-resort direct downloads failed: ${directError.message}`);
         throw new Error('Could not open download stream from Instagram servers.');
       }
     }
