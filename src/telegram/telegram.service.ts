@@ -61,7 +61,7 @@ export class TelegramService implements OnModuleInit, OnModuleDestroy {
     private readonly databaseService: DatabaseService,
   ) {}
 
-  onModuleInit() {
+  async onModuleInit() {
     const token = this.configService.get<string>('TELEGRAM_BOT_TOKEN');
     if (!token || token.includes('YOUR_TELEGRAM_BOT_TOKEN')) {
       this.logger.error('TELEGRAM_BOT_TOKEN is not defined or is set to placeholder in .env!');
@@ -70,16 +70,35 @@ export class TelegramService implements OnModuleInit, OnModuleDestroy {
 
     this.bot = new Telegraf(token);
     this.setupHandlers();
-    
-    this.bot.launch()
-      .then(() => this.logger.log('Telegram Bot successfully launched!'))
-      .catch((err) => this.logger.error('Failed to launch Telegram Bot:', err));
+
+    // Wait 5 seconds before launching to let the old Render instance fully
+    // release its getUpdates long-poll lock and avoid 409 Conflict errors.
+    this.logger.log('Waiting 5s for previous instance to release Telegram polling lock...');
+    await new Promise(resolve => setTimeout(resolve, 5000));
+
+    const launch = async (attempt = 1) => {
+      try {
+        await this.bot.launch();
+        this.logger.log('Telegram Bot successfully launched!');
+      } catch (err: any) {
+        if (err?.response?.error_code === 409 && attempt <= 5) {
+          const delay = attempt * 3000;
+          this.logger.warn(`409 Conflict on attempt ${attempt}. Retrying in ${delay / 1000}s...`);
+          await new Promise(r => setTimeout(r, delay));
+          return launch(attempt + 1);
+        }
+        this.logger.error('Failed to launch Telegram Bot:', err);
+      }
+    };
+
+    launch();
   }
 
   onModuleDestroy() {
     if (this.bot) {
+      this.bot.stop('SIGTERM');
       this.bot.stop('SIGINT');
-      this.logger.log('Telegram Bot stopped.');
+      this.logger.log('Telegram Bot stopped gracefully.');
     }
   }
 
