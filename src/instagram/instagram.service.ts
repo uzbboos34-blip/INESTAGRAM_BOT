@@ -58,6 +58,7 @@ export class InstagramService {
     // --- GLOBAL AXIOS REQUEST INTERCEPTOR ---
     // Intercepts and routes scraping requests from third-party libraries (like instagram-url-direct)
     // through our rotated proxy pool to prevent Render's datacenter IP from getting banned by Instagram.
+    // Skip requests marked with isDirectScraper (our native cookie-based queries).
     axios.interceptors.request.use(
       (config) => {
         const isScrapingRequest =
@@ -66,7 +67,8 @@ export class InstagramService {
           !config.url.includes('scontent') && // Ignore media downloads
           config.responseType !== 'stream' &&
           config.responseType !== 'arraybuffer' &&
-          !config.proxy; // Only apply if proxy is not already set
+          !config.proxy && // Only apply if proxy is not already set
+          !(config as any).isDirectScraper; // Skip our own stable native cookie scraper
 
         if (isScrapingRequest) {
           const proxies = this.getProxyList();
@@ -318,12 +320,21 @@ export class InstagramService {
    * Native custom GraphQL scraper with direct stable connection (no proxy).
    * Directly queries Instagram's GraphQL endpoint using a stable IP and account session cookie
    * to avoid 403 flags caused by rotating proxy locations.
+   * Supports rotating multiple cookies using double-pipe '||' separator.
    */
   private async queryInstagramGraphQL(shortcode: string): Promise<InstagramMediaResponse | null> {
-    const cookie = process.env.INSTAGRAM_COOKIE;
-    if (!cookie || cookie.trim() === '') {
+    const cookieEnv = process.env.INSTAGRAM_COOKIE;
+    if (!cookieEnv || cookieEnv.trim() === '') {
       return null;
     }
+
+    // Split by double-pipe || to support multi-cookie rotation
+    const cookiesList = cookieEnv.split('||').map(c => c.trim()).filter(c => c.length > 0);
+    if (cookiesList.length === 0) {
+      return null;
+    }
+
+    const cookie = cookiesList[Math.floor(Math.random() * cookiesList.length)];
 
     try {
       const BASE_URL = "https://www.instagram.com/graphql/query";
@@ -340,10 +351,11 @@ export class InstagramService {
       dataBody.append('variables', variables);
       dataBody.append('doc_id', INSTAGRAM_DOCUMENT_ID);
 
-      // Perform query directly (NO PROXY) using keep-alive to keep the IP connection stable
+      // Perform query directly (NO PROXY) using keep-alive. Set isDirectScraper to bypass the interceptor.
       const axiosConfig = this.getDirectAxiosConfig({
         method: 'POST',
         url: BASE_URL,
+        isDirectScraper: true, // <-- Custom flag to bypass interceptor proxying
         headers: {
           'Content-Type': 'application/x-www-form-urlencoded',
           'Cookie': cookie,
