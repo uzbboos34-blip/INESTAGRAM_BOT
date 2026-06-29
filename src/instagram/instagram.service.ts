@@ -314,8 +314,103 @@ export class InstagramService {
     return match ? match[1] + '/' : url;
   }
 
+  /**
+   * Native custom GraphQL scraper with proxy and cookie support.
+   * Directly queries Instagram's GraphQL endpoint using rotated proxies and account session cookie.
+   */
+  private async queryInstagramGraphQL(shortcode: string): Promise<InstagramMediaResponse | null> {
+    const cookie = process.env.INSTAGRAM_COOKIE;
+    if (!cookie || cookie.trim() === '') {
+      return null;
+    }
+
+    try {
+      const BASE_URL = "https://www.instagram.com/graphql/query";
+      const INSTAGRAM_DOCUMENT_ID = "9510064595728286";
+      
+      const variables = JSON.stringify({
+        shortcode: shortcode,
+        fetch_tagged_user_count: null,
+        hoisted_comment_id: null,
+        hoisted_reply_id: null
+      });
+
+      const dataBody = new URLSearchParams();
+      dataBody.append('variables', variables);
+      dataBody.append('doc_id', INSTAGRAM_DOCUMENT_ID);
+
+      // Perform request through rotated proxies with session cookies
+      const axiosConfig = this.getAxiosConfig({
+        method: 'POST',
+        url: BASE_URL,
+        headers: {
+          'Content-Type': 'application/x-www-form-urlencoded',
+          'Cookie': cookie,
+          'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+          'X-IG-App-ID': '936619743392459',
+        },
+        data: dataBody.toString(),
+        timeout: 8000,
+      });
+
+      this.logger.log(`[Native Scraper] Attempting GraphQL scrap with session cookies for shortcode: ${shortcode}...`);
+      const response = await axios(axiosConfig);
+      const mediaData = response.data?.data?.xdt_shortcode_media;
+      if (!mediaData) {
+        throw new Error('GraphQL response did not return media data. Cookies might be expired or blocked.');
+      }
+
+      const urlList: string[] = [];
+      const mediaDetails: MediaDetail[] = [];
+
+      const formatMediaDetails = (item: any): MediaDetail => {
+        const isVideo = !!item.is_video;
+        return {
+          type: isVideo ? 'video' : 'image',
+          url: this.extractDirectUrl(isVideo ? item.video_url : item.display_url),
+          thumbnail: item.display_url,
+        };
+      };
+
+      if (mediaData.__typename === 'XDTGraphSidecar') {
+        mediaData.edge_sidecar_to_children?.edges?.forEach((edge: any) => {
+          if (edge.node) {
+            const detail = formatMediaDetails(edge.node);
+            mediaDetails.push(detail);
+            urlList.push(detail.url);
+          }
+        });
+      } else {
+        const detail = formatMediaDetails(mediaData);
+        mediaDetails.push(detail);
+        urlList.push(detail.url);
+      }
+
+      this.logger.log(`[Native Scraper] Successfully scraped Reel (${shortcode}) using Session Cookie!`);
+      return {
+        results_number: urlList.length,
+        url_list: urlList,
+        media_details: mediaDetails,
+      };
+
+    } catch (err) {
+      this.logger.warn(`[Native Scraper] native GraphQL query failed: ${err.message}`);
+      return null;
+    }
+  }
+
   async getMediaUrls(url: string): Promise<InstagramMediaResponse> {
     const normalized = this.normalizeUrl(url);
+
+    // --- STEP 1: Attempt native custom GraphQL scrape with Session Cookies ---
+    const shortcodeMatch = normalized.match(/(?:p|reel|tv|reels)\/([A-Za-z0-9_-]+)/);
+    if (shortcodeMatch) {
+      const shortcode = shortcodeMatch[1];
+      const nativeResult = await this.queryInstagramGraphQL(shortcode);
+      if (nativeResult) {
+        return nativeResult;
+      }
+    }
     
     // --- METHOD 0: Custom API & Cookie Rotation ---
     if (this.apiUrls.length > 0 && this.cookies.length > 0 && !this.apiUrls[0].includes('api1.myapp.com')) {
