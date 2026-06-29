@@ -200,47 +200,57 @@ export class InstagramService {
 
       // ── Scraper 1: btch-downloader ──
       (async () => {
-        const data = await igdl(normalized);
-        if (!data?.result?.length) throw new Error('btch-downloader: empty result');
+        try {
+          const data = await igdl(normalized);
+          if (!data?.result?.length) throw new Error('btch-downloader: empty result');
 
-        const valid = data.result.filter(i => i.url && typeof i.url === 'string' && i.url.trim());
-        if (!valid.length) throw new Error('btch-downloader: no valid URLs');
+          const valid = data.result.filter(i => i.url && typeof i.url === 'string' && i.url.trim());
+          if (!valid.length) throw new Error('btch-downloader: no valid URLs');
 
-        const urlList = valid.map(i => this.extractDirectUrl(i.url));
-        const mediaDetails: MediaDetail[] = valid.map(i => {
-          const u = this.extractDirectUrl(i.url);
-          const isVideo = u.includes('.mp4') || u.toLowerCase().includes('video') || u.includes('&mime=video');
-          return { type: isVideo ? 'video' : 'image', url: u, thumbnail: i.thumbnail, filename: (i as any).filename };
-        });
-        this.logger.log(`[Race] btch-downloader won with ${urlList.length} URL(s)`);
-        return { results_number: urlList.length, url_list: urlList, media_details: mediaDetails };
+          const urlList = valid.map(i => this.extractDirectUrl(i.url));
+          const mediaDetails: MediaDetail[] = valid.map(i => {
+            const u = this.extractDirectUrl(i.url);
+            const isVideo = u.includes('.mp4') || u.toLowerCase().includes('video') || u.includes('&mime=video');
+            return { type: isVideo ? 'video' : 'image', url: u, thumbnail: i.thumbnail, filename: (i as any).filename };
+          });
+          this.logger.log(`[Race] btch-downloader won with ${urlList.length} URL(s)`);
+          return { results_number: urlList.length, url_list: urlList, media_details: mediaDetails };
+        } catch (err: any) {
+          this.logger.warn(`[Race] btch-downloader failed: ${err.message}`);
+          throw err;
+        }
       })(),
 
       // ── Scraper 2: instagram-url-direct ──
       (async () => {
-        const data = await instagramGetUrl(normalized);
-        if (!data) throw new Error('instagram-url-direct: no data');
+        try {
+          const data = await instagramGetUrl(normalized);
+          if (!data) throw new Error('instagram-url-direct: no data');
 
-        const rawUrls: string[] = (data.url_list || []).filter((u: string) => u?.trim());
-        const urlList = rawUrls.map((u: string) => this.extractDirectUrl(u));
-        const mediaDetails: MediaDetail[] = (data.media_details || urlList.map((u: string) => {
-          const isVideo = u.includes('.mp4') || u.toLowerCase().includes('video');
-          return { type: isVideo ? 'video' : 'image', url: u };
-        }));
+          const rawUrls: string[] = (data.url_list || []).filter((u: string) => u?.trim());
+          const urlList = rawUrls.map((u: string) => this.extractDirectUrl(u));
+          const mediaDetails: MediaDetail[] = (data.media_details || urlList.map((u: string) => {
+            const isVideo = u.includes('.mp4') || u.toLowerCase().includes('video');
+            return { type: isVideo ? 'video' : 'image', url: u };
+          }));
 
-        if (!urlList.length && !mediaDetails.length) throw new Error('instagram-url-direct: empty result');
-        this.logger.log(`[Race] instagram-url-direct won with ${urlList.length} URL(s)`);
-        return {
-          results_number: urlList.length || mediaDetails.length,
-          url_list: urlList,
-          media_details: mediaDetails,
-        };
+          if (!urlList.length && !mediaDetails.length) throw new Error('instagram-url-direct: empty result');
+          this.logger.log(`[Race] instagram-url-direct won with ${urlList.length} URL(s)`);
+          return {
+            results_number: urlList.length || mediaDetails.length,
+            url_list: urlList,
+            media_details: mediaDetails,
+          };
+        } catch (err: any) {
+          this.logger.warn(`[Race] instagram-url-direct failed: ${err.message}`);
+          throw err;
+        }
       })(),
     ];
 
     try {
       return await Promise.any(scrapers);
-    } catch {
+    } catch (err: any) {
       this.logger.error(`[Race] All scrapers failed for ${url}`);
       throw new Error("Instagram videoni yuklab bo'lmadi. Bu video shaxsiy (private) akkauntdan olingan bo'lishi, o'chirilgan bo'lishi yoki tizimda yuklanish ko'pligi sababli bo'lishi mumkin.");
     }
