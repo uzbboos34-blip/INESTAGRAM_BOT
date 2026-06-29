@@ -128,13 +128,28 @@ export class InstagramService {
 
   private setupAxiosInterceptor() {
     axios.interceptors.request.use((config) => {
-      const isInstagramScrape =
-        config.url?.includes('instagram.com') &&
-        !config.url.includes('scontent') &&          // skip CDN media
-        config.responseType !== 'stream' &&
-        config.responseType !== 'arraybuffer' &&
-        !config.proxy &&                              // only if proxy not already set
-        !(config as any).skipInterceptor;             // allow explicit bypass
+      let isInstagramScrape = false;
+      if (config.url) {
+        try {
+          const parsed = new URL(config.url);
+          isInstagramScrape =
+            (parsed.hostname === 'instagram.com' || parsed.hostname === 'www.instagram.com') &&
+            !config.url.includes('scontent') &&
+            config.responseType !== 'stream' &&
+            config.responseType !== 'arraybuffer' &&
+            !config.proxy &&
+            !(config as any).skipInterceptor;
+        } catch (_) {
+          isInstagramScrape =
+            config.url.includes('instagram.com') &&
+            !config.url.includes('jerrycoder.oggyapi.workers.dev') &&
+            !config.url.includes('scontent') &&
+            config.responseType !== 'stream' &&
+            config.responseType !== 'arraybuffer' &&
+            !config.proxy &&
+            !(config as any).skipInterceptor;
+        }
+      }
 
       if (isInstagramScrape) {
         const p = this.getNextProxy();
