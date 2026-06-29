@@ -315,8 +315,9 @@ export class InstagramService {
   }
 
   /**
-   * Native custom GraphQL scraper with proxy and cookie support.
-   * Directly queries Instagram's GraphQL endpoint using rotated proxies and account session cookie.
+   * Native custom GraphQL scraper with direct stable connection (no proxy).
+   * Directly queries Instagram's GraphQL endpoint using a stable IP and account session cookie
+   * to avoid 403 flags caused by rotating proxy locations.
    */
   private async queryInstagramGraphQL(shortcode: string): Promise<InstagramMediaResponse | null> {
     const cookie = process.env.INSTAGRAM_COOKIE;
@@ -339,8 +340,8 @@ export class InstagramService {
       dataBody.append('variables', variables);
       dataBody.append('doc_id', INSTAGRAM_DOCUMENT_ID);
 
-      // Perform request through rotated proxies with session cookies
-      const axiosConfig = this.getAxiosConfig({
+      // Perform query directly (NO PROXY) using keep-alive to keep the IP connection stable
+      const axiosConfig = this.getDirectAxiosConfig({
         method: 'POST',
         url: BASE_URL,
         headers: {
@@ -353,7 +354,7 @@ export class InstagramService {
         timeout: 8000,
       });
 
-      this.logger.log(`[Native Scraper] Attempting GraphQL scrap with session cookies for shortcode: ${shortcode}...`);
+      this.logger.log(`[Native Scraper] Attempting GraphQL scrap (Direct connection) for shortcode: ${shortcode}...`);
       const response = await axios(axiosConfig);
       const mediaData = response.data?.data?.xdt_shortcode_media;
       if (!mediaData) {
