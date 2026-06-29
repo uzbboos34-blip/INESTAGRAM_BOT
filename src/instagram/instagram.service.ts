@@ -1,20 +1,16 @@
 import { Injectable, Logger } from '@nestjs/common';
-import axios from 'axios';
+import axios, { AxiosInstance } from 'axios';
 import * as http from 'http';
 import * as https from 'https';
 
 // eslint-disable-next-line @typescript-eslint/no-require-imports
 const { instagramGetUrl } = require('instagram-url-direct');
 
-// Import btch-downloader igdl function
 import { igdl } from 'btch-downloader';
 
 export interface MediaDetail {
   type: 'video' | 'image';
-  dimensions?: {
-    height: string;
-    width: string;
-  };
+  dimensions?: { height: string; width: string };
   url: string;
   thumbnail?: string;
   filename?: string;
@@ -29,275 +25,138 @@ export interface InstagramMediaResponse {
 interface ProxyDetails {
   host: string;
   port: number;
-  username?: string;
-  password?: string;
+  username: string;
+  password: string;
 }
 
 @Injectable()
 export class InstagramService {
   private readonly logger = new Logger(InstagramService.name);
 
-  // --- KEEP-ALIVE CONNECTION AGENTS ---
+  // Keep-alive agents for direct downloads (CDN media files)
   private readonly httpAgent = new http.Agent({ keepAlive: true, maxSockets: 50 });
   private readonly httpsAgent = new https.Agent({ keepAlive: true, maxSockets: 50 });
 
-
+  // Proxy rotation state — track last used index per account to avoid hammering one proxy
+  private proxyIndex = 0;
 
   constructor() {
-    // --- GLOBAL AXIOS REQUEST INTERCEPTOR ---
-    // Intercepts and routes scraping requests from third-party libraries (like instagram-url-direct)
-    // through our rotated proxy pool to prevent Render's datacenter IP from getting banned by Instagram.
-    // Skip requests marked with isDirectScraper (our native cookie-based queries).
-    axios.interceptors.request.use(
-      (config) => {
-        const isScrapingRequest =
-          config.url &&
-          config.url.includes('instagram.com') &&
-          !config.url.includes('scontent') && // Ignore media downloads
-          config.responseType !== 'stream' &&
-          config.responseType !== 'arraybuffer' &&
-          !config.proxy && // Only apply if proxy is not already set
-          !(config as any).isDirectScraper; // Skip our own stable native cookie scraper
-
-        if (isScrapingRequest) {
-          const proxies = this.getProxyList();
-          if (proxies.length > 0) {
-            const selected = proxies[Math.floor(Math.random() * proxies.length)];
-            const defaultUser = process.env.PROXY_USERNAME || 'vyrysnub';
-            const defaultPass = process.env.PROXY_PASSWORD || 'm2taxn81eypu';
-
-            config.proxy = {
-              host: selected.host,
-              port: selected.port,
-            };
-
-            if (defaultUser && defaultPass) {
-              config.proxy.auth = {
-                username: defaultUser,
-                password: defaultPass,
-              };
-            }
-            this.logger.log(`[Axios Interceptor] Routed third-party scraping request to ${config.url} via proxy ${selected.host}`);
-          }
-        }
-        return config;
-      },
-      (error) => {
-        return Promise.reject(error);
-      }
-    );
+    this.setupAxiosInterceptor();
   }
 
-  /**
-   * Parses the PROXY_POOL env variable or falls back to the default list.
-   */
+  // ─────────────────────────────────────────────
+  // PROXY POOL
+  // ─────────────────────────────────────────────
+
   private getProxyList(): ProxyDetails[] {
     const envPool = process.env.PROXY_POOL;
     if (envPool) {
       try {
-        return envPool.split(',').map(item => {
-          const cleanItem = item.trim();
-          if (cleanItem.includes('@')) {
-            const [credentials, address] = cleanItem.split('@');
-            const [username, password] = credentials.split(':');
-            const [host, port] = address.split(':');
-            return {
-              host: host.trim(),
-              port: parseInt(port.trim(), 10),
-              username: username.trim(),
-              password: password.trim(),
-            };
+        const parsed = envPool.split(',').map(item => {
+          const clean = item.trim();
+          if (clean.includes('@')) {
+            const atIdx = clean.lastIndexOf('@');
+            const creds = clean.substring(0, atIdx);
+            const addr = clean.substring(atIdx + 1);
+            const [username, password] = creds.split(':');
+            const [host, portStr] = addr.split(':');
+            return { host: host.trim(), port: parseInt(portStr.trim(), 10), username: username.trim(), password: password.trim() };
           } else {
-            const [host, port] = cleanItem.split(':');
-            return {
-              host: host.trim(),
-              port: parseInt(port.trim(), 10),
-            };
+            const [host, portStr] = clean.split(':');
+            return { host: host.trim(), port: parseInt(portStr.trim(), 10), username: '', password: '' };
           }
-        });
+        }).filter(p => p.host && !isNaN(p.port));
+        if (parsed.length > 0) return parsed;
       } catch (err) {
-        this.logger.warn(`Failed to parse PROXY_POOL: ${err.message}. Using default pool.`);
+        this.logger.warn(`Failed to parse PROXY_POOL env: ${err.message}`);
       }
     }
-
+    // Fallback hardcoded list with correct credentials
+    const defaultUser = process.env.PROXY_USERNAME || 'vyrysnub';
+    const defaultPass = process.env.PROXY_PASSWORD || 'm2taxn81eypu';
     return [
-      { host: '31.59.20.176', port: 6754 },
-      { host: '31.56.127.193', port: 7684 },
-      { host: '45.38.107.97', port: 6014 },
-      { host: '38.154.203.95', port: 5863 },
-      { host: '198.105.121.200', port: 6462 },
-      { host: '64.137.96.74', port: 6641 },
-      { host: '198.23.243.226', port: 6361 },
-      { host: '38.154.185.97', port: 6370 },
-      { host: '142.111.67.146', port: 5611 },
-      { host: '191.96.254.138', port: 6185 }
+      { host: '31.59.20.176',    port: 6754, username: defaultUser, password: defaultPass },
+      { host: '31.56.127.193',   port: 7684, username: defaultUser, password: defaultPass },
+      { host: '45.38.107.97',    port: 6014, username: defaultUser, password: defaultPass },
+      { host: '38.154.203.95',   port: 5863, username: defaultUser, password: defaultPass },
+      { host: '198.105.121.200', port: 6462, username: defaultUser, password: defaultPass },
+      { host: '64.137.96.74',    port: 6641, username: defaultUser, password: defaultPass },
+      { host: '198.23.243.226',  port: 6361, username: defaultUser, password: defaultPass },
+      { host: '38.154.185.97',   port: 6370, username: defaultUser, password: defaultPass },
+      { host: '142.111.67.146',  port: 5611, username: defaultUser, password: defaultPass },
+      { host: '191.96.254.138',  port: 6185, username: defaultUser, password: defaultPass },
     ];
   }
 
-  private getAxiosConfig(options: any = {}): any {
+  /**
+   * Returns the next proxy in round-robin order.
+   * Round-robin ensures every proxy gets equal usage — no single proxy gets hammered.
+   */
+  private getNextProxy(): ProxyDetails {
     const proxies = this.getProxyList();
-    const defaultUser = process.env.PROXY_USERNAME || 'vyrysnub';
-    const defaultPass = process.env.PROXY_PASSWORD || 'm2taxn81eypu';
-
-    const config: any = { ...options };
-
-    if (proxies.length > 0) {
-      const selected = proxies[Math.floor(Math.random() * proxies.length)];
-      const username = selected.username || defaultUser;
-      const password = selected.password || defaultPass;
-
-      config.proxy = {
-        host: selected.host,
-        port: selected.port,
-      };
-
-      if (username && password) {
-        config.proxy.auth = {
-          username,
-          password,
-        };
-      }
-    }
-
-    return config;
+    const proxy = proxies[this.proxyIndex % proxies.length];
+    this.proxyIndex = (this.proxyIndex + 1) % proxies.length;
+    return proxy;
   }
 
-  private getDirectAxiosConfig(options: any = {}): any {
+  /**
+   * Builds an axios config with a rotated proxy attached.
+   */
+  private withProxy(options: any = {}): any {
+    const p = this.getNextProxy();
+    this.logger.log(`[Proxy] Using ${p.host}:${p.port} (${p.username})`);
     return {
-      httpAgent: this.httpAgent,
-      httpsAgent: this.httpsAgent,
       ...options,
+      proxy: {
+        host: p.host,
+        port: p.port,
+        auth: p.username ? { username: p.username, password: p.password } : undefined,
+      },
     };
   }
 
-  extractDirectUrl(url: string): string {
-    try {
-      if (url && url.includes('token=')) {
-        const urlObj = new URL(url);
-        const token = urlObj.searchParams.get('token');
-        if (token) {
-          const parts = token.split('.');
-          if (parts.length >= 2) {
-            const payloadBase64 = parts[1];
-            const normalizedBase64 = payloadBase64.replace(/-/g, '+').replace(/_/g, '/');
-            const padLen = (4 - (normalizedBase64.length % 4)) % 4;
-            const paddedBase64 = normalizedBase64 + '='.repeat(padLen);
-            const jsonStr = Buffer.from(paddedBase64, 'base64').toString('utf8');
-
-            const sanitizedStr = jsonStr.replace(/[\x00-\x1F\x7F-\x9F]/g, (char) => {
-              if (char === '\n') return '\\n';
-              if (char === '\r') return '\\r';
-              if (char === '\t') return '\\t';
-              return '';
-            });
-
-            const payload = JSON.parse(sanitizedStr);
-            if (payload && payload.url) {
-              return payload.url;
-            }
-          }
-        }
-      }
-    } catch (err) {
-      this.logger.warn(`Failed to extract direct URL from token: ${err.message}`);
-    }
-    return url || '';
+  /**
+   * Builds an axios config for direct downloads (no proxy — CDN media URLs work without it).
+   */
+  private withDirect(options: any = {}): any {
+    return { httpAgent: this.httpAgent, httpsAgent: this.httpsAgent, ...options };
   }
 
-  getWeightedShuffled<T>(array: T[]): T[] {
-    const copy = [...array];
-    for (let i = copy.length - 1; i > 0; i--) {
-      const j = Math.floor(Math.random() * (i + 1));
-      [copy[i], copy[j]] = [copy[j], copy[i]];
-    }
-    return copy;
-  }
+  // ─────────────────────────────────────────────
+  // AXIOS INTERCEPTOR
+  // Automatically routes all third-party library requests (instagram-url-direct, btch-downloader)
+  // through rotating proxies. Uses round-robin so requests spread evenly.
+  // ─────────────────────────────────────────────
 
-  private async sendRotatedRequest(
-    apiUrl: string,
-    cookie: string,
-    instagramUrl: string,
-    retryCount = 0,
-  ): Promise<{ success: boolean; data?: any; error?: string }> {
-    try {
-      this.logger.log(`[Rotator] Sending to ${apiUrl} using cookie hash (${cookie.substring(0, 15)}...)`);
+  private setupAxiosInterceptor() {
+    axios.interceptors.request.use((config) => {
+      const isInstagramScrape =
+        config.url?.includes('instagram.com') &&
+        !config.url.includes('scontent') &&          // skip CDN media
+        config.responseType !== 'stream' &&
+        config.responseType !== 'arraybuffer' &&
+        !config.proxy &&                              // only if proxy not already set
+        !(config as any).skipInterceptor;             // allow explicit bypass
 
-      const axiosConfig = this.getAxiosConfig({
-        params: { url: instagramUrl },
-        headers: { Cookie: cookie },
-        timeout: 5000,
-      });
-
-      const response = await axios.get(`${apiUrl}/endpoint`, axiosConfig);
-      return { success: true, data: response.data };
-    } catch (err: any) {
-      const status = err?.response?.status;
-      this.logger.warn(`[Rotator] API ${apiUrl} failed with status ${status}: ${err.message}`);
-
-      if (status === 429 && retryCount < 3) {
-        await new Promise(r => setTimeout(r, 500 * (retryCount + 1)));
-        return this.sendRotatedRequest(apiUrl, cookie, instagramUrl, retryCount + 1);
-      }
-
-      return { success: false, error: `${status ?? 'network'}: ${err.message}` };
-    }
-  }
-
-  private parseCustomApiResponse(data: any): InstagramMediaResponse | null {
-    if (!data) return null;
-
-    if (data.url_list || data.media_details) {
-      return data as InstagramMediaResponse;
-    }
-
-    if (Array.isArray(data.result)) {
-      const validItems = data.result.filter((item: any) => {
-        const u = item.url || item;
-        return typeof u === 'string' && u.trim() !== '';
-      });
-
-      if (validItems.length === 0) return null;
-
-      const urlList = validItems.map((item: any) => this.extractDirectUrl(item.url || item));
-      const mediaDetails = validItems.map((item: any) => {
-        const directUrl = this.extractDirectUrl(item.url || item);
-        const isVideo = directUrl.includes('.mp4') || directUrl.toLowerCase().includes('video') || directUrl.includes('&mime=video');
-        return {
-          type: (isVideo ? 'video' : 'image') as 'video' | 'image',
-          url: directUrl,
-          thumbnail: item.thumbnail,
-          filename: item.filename,
+      if (isInstagramScrape) {
+        const p = this.getNextProxy();
+        config.proxy = {
+          host: p.host,
+          port: p.port,
+          auth: p.username ? { username: p.username, password: p.password } : undefined,
         };
-      });
-
-      return {
-        results_number: urlList.length,
-        url_list: urlList,
-        media_details: mediaDetails,
-      };
-    }
-
-    const singleUrl = data.url || data.videoUrl || data.downloadUrl || data.video;
-    if (typeof singleUrl === 'string' && singleUrl.trim() !== '') {
-      const directUrl = this.extractDirectUrl(singleUrl);
-      const isVideo = directUrl.includes('.mp4') || directUrl.toLowerCase().includes('video') || directUrl.includes('&mime=video');
-      return {
-        results_number: 1,
-        url_list: [directUrl],
-        media_details: [{
-          type: isVideo ? 'video' : 'image',
-          url: directUrl,
-        }],
-      };
-    }
-
-    return null;
+        this.logger.log(`[Interceptor] ${config.url} → proxy ${p.host}:${p.port}`);
+      }
+      return config;
+    });
   }
+
+  // ─────────────────────────────────────────────
+  // HELPERS
+  // ─────────────────────────────────────────────
 
   isValidUrl(url: string): boolean {
-    if (!url) return false;
-    const regex = /https?:\/\/(www\.)?instagram\.com\/(p|reel|tv|reels)\/([A-Za-z0-9_-]+)/i;
-    return regex.test(url);
+    return /https?:\/\/(www\.)?instagram\.com\/(p|reel|tv|reels)\/[A-Za-z0-9_-]+/i.test(url || '');
   }
 
   normalizeUrl(url: string): string {
@@ -305,245 +164,160 @@ export class InstagramService {
     return match ? match[1] + '/' : url;
   }
 
+  extractDirectUrl(url: string): string {
+    try {
+      if (url?.includes('token=')) {
+        const token = new URL(url).searchParams.get('token');
+        if (token) {
+          const parts = token.split('.');
+          if (parts.length >= 2) {
+            const b64 = parts[1].replace(/-/g, '+').replace(/_/g, '/');
+            const padded = b64 + '='.repeat((4 - b64.length % 4) % 4);
+            const raw = Buffer.from(padded, 'base64').toString('utf8');
+            const sanitized = raw.replace(/[\x00-\x1F\x7F-\x9F]/g, c =>
+              c === '\n' ? '\\n' : c === '\r' ? '\\r' : c === '\t' ? '\\t' : ''
+            );
+            const payload = JSON.parse(sanitized);
+            if (payload?.url) return payload.url;
+          }
+        }
+      }
+    } catch (_) { /* ignore */ }
+    return url || '';
+  }
+
+  // ─────────────────────────────────────────────
+  // MAIN SCRAPING FUNCTION
+  // Uses Promise.any() — whichever scraper succeeds first wins.
+  // Both scrapers run in parallel through rotating proxies (round-robin).
+  // ─────────────────────────────────────────────
 
   async getMediaUrls(url: string): Promise<InstagramMediaResponse> {
     const normalized = this.normalizeUrl(url);
+    this.logger.log(`[Race] Starting parallel scrapers for ${normalized}`);
 
-    // --- CONCURRENT SCRAPING RACE ENGINE ---
-    this.logger.log('Launching concurrent scraper race (btch-downloader & instagram-url-direct)...');
+    const scrapers: Promise<InstagramMediaResponse>[] = [
 
-    const scraperPromises = [
-      // Scraper Task 1: btch-downloader
+      // ── Scraper 1: btch-downloader ──
       (async () => {
-        try {
-          const data = await igdl(normalized);
-          if (data && data.result && data.result.length > 0) {
-            const validResults = data.result.filter(item => item.url && typeof item.url === 'string' && item.url.trim() !== '');
-            if (validResults.length > 0) {
-              const urlList = validResults.map(item => this.extractDirectUrl(item.url));
-              const mediaDetails = validResults.map(item => {
-                const directUrl = this.extractDirectUrl(item.url);
-                const isVideo = directUrl.includes('.mp4') || directUrl.toLowerCase().includes('video') || directUrl.includes('&mime=video');
-                return {
-                  type: (isVideo ? 'video' : 'image') as 'video' | 'image',
-                  url: directUrl,
-                  thumbnail: item.thumbnail,
-                  filename: (item as any).filename,
-                };
-              });
-              return {
-                results_number: validResults.length,
-                url_list: urlList,
-                media_details: mediaDetails,
-              };
-            }
-          }
-          throw new Error('btch-downloader returned empty results');
-        } catch (err) {
-          throw err;
-        }
+        const data = await igdl(normalized);
+        if (!data?.result?.length) throw new Error('btch-downloader: empty result');
+
+        const valid = data.result.filter(i => i.url && typeof i.url === 'string' && i.url.trim());
+        if (!valid.length) throw new Error('btch-downloader: no valid URLs');
+
+        const urlList = valid.map(i => this.extractDirectUrl(i.url));
+        const mediaDetails: MediaDetail[] = valid.map(i => {
+          const u = this.extractDirectUrl(i.url);
+          const isVideo = u.includes('.mp4') || u.toLowerCase().includes('video') || u.includes('&mime=video');
+          return { type: isVideo ? 'video' : 'image', url: u, thumbnail: i.thumbnail, filename: (i as any).filename };
+        });
+        this.logger.log(`[Race] btch-downloader won with ${urlList.length} URL(s)`);
+        return { results_number: urlList.length, url_list: urlList, media_details: mediaDetails };
       })(),
 
-      // Scraper Task 2: instagram-url-direct
+      // ── Scraper 2: instagram-url-direct ──
       (async () => {
-        try {
-          const data = await instagramGetUrl(normalized);
-          if (data && (data.url_list || data.media_details)) {
-            const rawUrls = data.url_list || [];
-            const urlList = rawUrls.filter((u: string) => u && typeof u === 'string' && u.trim() !== '').map((u: string) => this.extractDirectUrl(u));
-            const mediaDetails = data.media_details || urlList.map((mediaUrl: string) => {
-              const directUrl = this.extractDirectUrl(mediaUrl);
-              const isVideo = directUrl.includes('.mp4') || directUrl.toLowerCase().includes('video') || directUrl.includes('&mime=video');
-              return {
-                type: isVideo ? 'video' : 'image',
-                url: directUrl,
-              };
-            });
+        const data = await instagramGetUrl(normalized);
+        if (!data) throw new Error('instagram-url-direct: no data');
 
-            if (urlList.length > 0 || mediaDetails.length > 0) {
-              return {
-                results_number: urlList.length || mediaDetails.length,
-                url_list: urlList,
-                media_details: mediaDetails,
-              };
-            }
-          }
-          throw new Error('instagram-url-direct returned empty results');
-        } catch (err) {
-          throw err;
-        }
-      })()
+        const rawUrls: string[] = (data.url_list || []).filter((u: string) => u?.trim());
+        const urlList = rawUrls.map((u: string) => this.extractDirectUrl(u));
+        const mediaDetails: MediaDetail[] = (data.media_details || urlList.map((u: string) => {
+          const isVideo = u.includes('.mp4') || u.toLowerCase().includes('video');
+          return { type: isVideo ? 'video' : 'image', url: u };
+        }));
+
+        if (!urlList.length && !mediaDetails.length) throw new Error('instagram-url-direct: empty result');
+        this.logger.log(`[Race] instagram-url-direct won with ${urlList.length} URL(s)`);
+        return {
+          results_number: urlList.length || mediaDetails.length,
+          url_list: urlList,
+          media_details: mediaDetails,
+        };
+      })(),
     ];
 
     try {
-      return await Promise.any(scraperPromises);
-    } catch (error) {
-      this.logger.error(`All concurrent scrapers failed for URL (${url})`);
-      throw new Error('Instagram videoni yuklab bo\'lmadi. Bu video shaxsiy (private) akkauntdan olingan bo\'lishi, o\'chirilgan bo\'lishi yoki tizimda yuklanish ko\'pligi sababli bo\'lishi mumkin.');
+      return await Promise.any(scrapers);
+    } catch {
+      this.logger.error(`[Race] All scrapers failed for ${url}`);
+      throw new Error("Instagram videoni yuklab bo'lmadi. Bu video shaxsiy (private) akkauntdan olingan bo'lishi, o'chirilgan bo'lishi yoki tizimda yuklanish ko'pligi sababli bo'lishi mumkin.");
     }
   }
+
+  // ─────────────────────────────────────────────
+  // DOWNLOAD — Buffer (for small files / images)
+  // ─────────────────────────────────────────────
 
   async downloadMedia(url: string): Promise<{ data: Buffer; mimeType: string }> {
-    if (!url || typeof url !== 'string' || url.trim() === '') {
-      throw new Error('Invalid download URL provided');
+    if (!url?.trim()) throw new Error('Invalid download URL');
+
+    const headers = {
+      'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+      'Accept': '*/*',
+      'Connection': 'keep-alive',
+    };
+
+    // Try direct first (CDN URLs usually work without proxy)
+    try {
+      const res = await axios.get(url, this.withDirect({ responseType: 'arraybuffer', timeout: 15000, headers }));
+      return { data: Buffer.from(res.data), mimeType: (res.headers['content-type'] as string) || 'video/mp4' };
+    } catch (err) {
+      this.logger.warn(`[Download] Direct failed: ${err.message}. Trying proxy...`);
     }
 
-    const startDownload = Date.now();
-    const bypassDirect = process.env.BYPASS_DIRECT_DOWNLOAD === 'true';
-
-    if (!bypassDirect) {
-      try {
-        const axiosConfig = this.getDirectAxiosConfig({
-          responseType: 'arraybuffer',
-          timeout: 4000,
-          headers: {
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-            'Accept': '*/*',
-            'Accept-Encoding': 'gzip, deflate, br',
-            'Connection': 'keep-alive',
-          },
-        });
-
-        const response = await axios.get(url, axiosConfig);
-        const mimeType = (response.headers['content-type'] as string) || 'video/mp4';
-        return { data: Buffer.from(response.data), mimeType };
-      } catch (error) {
-        try {
-          const startProxy = Date.now();
-          const axiosConfig = this.getAxiosConfig({
-            responseType: 'arraybuffer',
-            headers: {
-              'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-              'Accept': '*/*',
-              'Accept-Encoding': 'gzip, deflate, br',
-              'Connection': 'keep-alive',
-            },
-          });
-          const response = await axios.get(url, axiosConfig);
-          const mimeType = (response.headers['content-type'] as string) || 'video/mp4';
-          return { data: Buffer.from(response.data), mimeType };
-        } catch (proxyError) {
-          throw new Error('Could not download the video stream from Instagram servers.');
-        }
-      }
-    } else {
-      try {
-        const startProxy = Date.now();
-        const axiosConfig = this.getAxiosConfig({
-          responseType: 'arraybuffer',
-          headers: {
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-            'Accept': '*/*',
-            'Accept-Encoding': 'gzip, deflate, br',
-            'Connection': 'keep-alive',
-          },
-        });
-        const response = await axios.get(url, axiosConfig);
-        const mimeType = (response.headers['content-type'] as string) || 'video/mp4';
-        return { data: Buffer.from(response.data), mimeType };
-      } catch (proxyError) {
-        try {
-          const startLastResort = Date.now();
-          const axiosConfig = this.getDirectAxiosConfig({
-            responseType: 'arraybuffer',
-            headers: {
-              'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-              'Accept': '*/*',
-              'Accept-Encoding': 'gzip, deflate, br',
-              'Connection': 'keep-alive',
-            },
-          });
-          const response = await axios.get(url, axiosConfig);
-          const mimeType = (response.headers['content-type'] as string) || 'video/mp4';
-          return { data: Buffer.from(response.data), mimeType };
-        } catch (directError) {
-          throw new Error('Could not download the video stream from Instagram servers.');
-        }
-      }
-    }
+    // Fallback: proxy
+    const res = await axios.get(url, this.withProxy({ responseType: 'arraybuffer', timeout: 20000, headers }));
+    return { data: Buffer.from(res.data), mimeType: (res.headers['content-type'] as string) || 'video/mp4' };
   }
 
-  async downloadMediaStream(url: string): Promise<{ stream: any; mimeType: string; contentLength?: string }> {
-    if (!url || typeof url !== 'string' || url.trim() === '') {
-      throw new Error('Invalid streaming URL provided');
-    }
+  // ─────────────────────────────────────────────
+  // DOWNLOAD STREAM — for large video files
+  // ─────────────────────────────────────────────
 
-    const startDownload = Date.now();
+  async downloadMediaStream(url: string): Promise<{ stream: any; mimeType: string; contentLength?: string }> {
+    if (!url?.trim()) throw new Error('Invalid streaming URL');
+
+    const headers = {
+      'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+      'Accept': '*/*',
+      'Connection': 'keep-alive',
+    };
+
     const bypassDirect = process.env.BYPASS_DIRECT_DOWNLOAD === 'true';
 
     if (!bypassDirect) {
       try {
-        const axiosConfig = this.getDirectAxiosConfig({
-          responseType: 'stream',
-          timeout: 4000,
-          headers: {
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-            'Accept': '*/*',
-            'Accept-Encoding': 'gzip, deflate, br',
-            'Connection': 'keep-alive',
-          },
-        });
-
-        const response = await axios.get(url, axiosConfig);
-        const mimeType = (response.headers['content-type'] as string) || 'video/mp4';
-        const contentLength = response.headers['content-length'] as string;
-
-        response.data.on('end', () => {
-          this.logger.log(`Instagram CDN stream completed (Direct) in ${Date.now() - startDownload}ms`);
-        });
-
-        return { stream: response.data, mimeType, contentLength };
-      } catch (error) {
-        this.logger.warn(`Direct download stream failed or timed out: ${error.message}. Switching to rotated proxy...`);
+        const res = await axios.get(url, this.withDirect({ responseType: 'stream', timeout: 8000, headers }));
+        return {
+          stream: res.data,
+          mimeType: (res.headers['content-type'] as string) || 'video/mp4',
+          contentLength: res.headers['content-length'] as string,
+        };
+      } catch (err) {
+        this.logger.warn(`[Stream] Direct failed: ${err.message}. Trying proxy...`);
       }
     }
 
-    const startProxy = Date.now();
+    // Proxy fallback
     try {
-      const axiosConfig = this.getAxiosConfig({
-        responseType: 'stream',
-        headers: {
-          'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-          'Accept': '*/*',
-          'Accept-Encoding': 'gzip, deflate, br',
-          'Connection': 'keep-alive',
-        },
-      });
-
-      const response = await axios.get(url, axiosConfig);
-      const mimeType = (response.headers['content-type'] as string) || 'video/mp4';
-      const contentLength = response.headers['content-length'] as string;
-
-      response.data.on('end', () => {
-        this.logger.log(`Instagram CDN stream completed (Proxy) in ${Date.now() - startProxy}ms`);
-      });
-
-      return { stream: response.data, mimeType, contentLength };
-    } catch (proxyError) {
-      const startLastResort = Date.now();
-      try {
-        const axiosConfig = this.getDirectAxiosConfig({
-          responseType: 'stream',
-          headers: {
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-            'Accept': '*/*',
-            'Accept-Encoding': 'gzip, deflate, br',
-            'Connection': 'keep-alive',
-          },
-        });
-
-        const response = await axios.get(url, axiosConfig);
-        const mimeType = (response.headers['content-type'] as string) || 'video/mp4';
-        const contentLength = response.headers['content-length'] as string;
-
-        response.data.on('end', () => {
-          this.logger.log(`Instagram CDN stream completed (Last Resort) in ${Date.now() - startLastResort}ms`);
-        });
-
-        return { stream: response.data, mimeType, contentLength };
-      } catch (directError) {
-        throw new Error('Could not open download stream from Instagram servers.');
-      }
+      const res = await axios.get(url, this.withProxy({ responseType: 'stream', timeout: 25000, headers }));
+      return {
+        stream: res.data,
+        mimeType: (res.headers['content-type'] as string) || 'video/mp4',
+        contentLength: res.headers['content-length'] as string,
+      };
+    } catch (err) {
+      this.logger.warn(`[Stream] Proxy failed: ${err.message}. Last resort direct...`);
     }
+
+    // Last resort: direct again without timeout
+    const res = await axios.get(url, this.withDirect({ responseType: 'stream', headers }));
+    return {
+      stream: res.data,
+      mimeType: (res.headers['content-type'] as string) || 'video/mp4',
+      contentLength: res.headers['content-length'] as string,
+    };
   }
 }
