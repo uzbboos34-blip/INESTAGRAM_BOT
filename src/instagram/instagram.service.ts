@@ -519,12 +519,42 @@ export class InstagramService {
                      html.match(/<meta[^>]*content=["']([^"']+)["'][^>]*property=["']og:description["']/i);
       if (ogMatch && ogMatch[1]) {
         let desc = ogMatch[1];
-        const cleanIdx = desc.indexOf('on Instagram: "');
-        if (cleanIdx !== -1) {
-          desc = desc.substring(cleanIdx + 15);
-          if (desc.endsWith('"')) desc = desc.slice(0, -1);
+        
+        // Decode HTML entities
+        desc = desc
+          .replace(/&#x([0-9a-fA-F]+);/g, (match, hex) => String.fromCodePoint(parseInt(hex, 16)))
+          .replace(/&#([0-9]+);/g, (match, dec) => String.fromCodePoint(parseInt(dec, 10)))
+          .replace(/&quot;/g, '"')
+          .replace(/&amp;/g, '&')
+          .replace(/&#39;/g, "'")
+          .replace(/&lt;/g, '<')
+          .replace(/&gt;/g, '>');
+
+        // Check full pattern with likes, comments, username and date
+        const matchFull = desc.match(/^([\d\.,MKB]+)\s+likes,\s+([\d\.,MKB]+)\s+comments\s+-\s+([a-zA-Z0-9_\.]+)\s+on\s+([^:]+):\s*"?([\s\S]*?)"?\.?$/i);
+        if (matchFull) {
+          const [, likes, comments, username, date, caption] = matchFull;
+          return `👤 *Muallif:* ${username}\n` +
+                 `❤️ *Likelar:* ${likes}\n` +
+                 `💬 *Izohlar:* ${comments}\n` +
+                 `📅 *Sana:* ${date}\n\n` +
+                 `📝 *Tavsif:*\n${caption.trim()}`;
         }
-        return desc.replace(/&quot;/g, '"').replace(/&amp;/g, '&').replace(/&#39;/g, "'").trim();
+
+        // Check short pattern with username and date/caption
+        const matchShort = desc.match(/^([a-zA-Z0-9_\.]+)\s+on\s+Instagram:\s*"?([\s\S]*?)"?\.?$/i);
+        if (matchShort) {
+          const [, username, caption] = matchShort;
+          return `👤 *Muallif:* ${username}\n\n` +
+                 `📝 *Tavsif:*\n${caption.trim()}`;
+        }
+
+        // Fallback: clean caption and return
+        let cleanDesc = desc;
+        if (cleanDesc.startsWith('"') && cleanDesc.endsWith('"')) {
+          cleanDesc = cleanDesc.slice(1, -1);
+        }
+        return `📝 *Tavsif:*\n${cleanDesc.trim()}`;
       }
     } catch (err) {
       this.logger.warn(`Failed to fetch caption for ${shortcode}: ${err.message}`);

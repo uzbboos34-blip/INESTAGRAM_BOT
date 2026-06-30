@@ -174,7 +174,7 @@ export class TelegramService implements OnModuleInit, OnModuleDestroy {
           // Check cache first
           const cachedCaption = await this.databaseService.getCaption(instagramUrl);
           if (cachedCaption) {
-            await ctx.reply(`📝 *Video tavsifi:*\n\n${cachedCaption}`, { parse_mode: 'Markdown' });
+            await ctx.reply(cachedCaption, { parse_mode: 'Markdown' });
             return;
           }
 
@@ -182,7 +182,7 @@ export class TelegramService implements OnModuleInit, OnModuleDestroy {
           const caption = await this.instagramService.getPostCaption(shortcode);
           if (caption) {
             await this.databaseService.setCaption(instagramUrl, caption);
-            await ctx.reply(`📝 *Video tavsifi:*\n\n${caption}`, { parse_mode: 'Markdown' });
+            await ctx.reply(caption, { parse_mode: 'Markdown' });
           } else {
             await ctx.reply('📝 *Tavsif:*\n\nInstagram videodan matnli tavsif olinmadi (post muallifi matn yozmagan yoki havola shaxsiy).', { parse_mode: 'Markdown' });
           }
