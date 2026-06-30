@@ -3,6 +3,7 @@ import axios, { AxiosInstance } from 'axios';
 import * as http from 'http';
 import * as https from 'https';
 import * as dns from 'dns';
+import { PassThrough } from 'stream';
 
 import { instagram as jerryInstagram } from '@jerrycoder/instagram-api';
 import { igdl } from 'btch-downloader';
@@ -75,6 +76,7 @@ export class InstagramService {
   // High performance TCP Keep-Alive Agents
   private readonly httpAgent = new http.Agent({
     keepAlive: true,
+    keepAliveMsecs: 1000, // TCP Keep-Alive delay set to 1 second
     maxSockets: 100,
     maxFreeSockets: 10,
     timeout: 15000,
@@ -85,6 +87,7 @@ export class InstagramService {
 
   private readonly httpsAgent = new https.Agent({
     keepAlive: true,
+    keepAliveMsecs: 1000, // TCP Keep-Alive delay set to 1 second
     maxSockets: 100,
     maxFreeSockets: 10,
     timeout: 15000,
@@ -412,6 +415,12 @@ export class InstagramService {
     return { data: Buffer.from(res.data), mimeType: (res.headers['content-type'] as string) || 'video/mp4' };
   }
 
+  private optimizeStream(rawStream: any): any {
+    const pass = new PassThrough({ highWaterMark: 1024 * 1024 }); // 1 MB buffer size
+    rawStream.pipe(pass);
+    return pass;
+  }
+
   // ─────────────────────────────────────────────
   // DOWNLOAD STREAM — for large video files
   // ─────────────────────────────────────────────
@@ -431,7 +440,7 @@ export class InstagramService {
       try {
         const res = await axios.get(url, this.withDirect({ responseType: 'stream', timeout: 8000, headers }));
         return {
-          stream: res.data,
+          stream: this.optimizeStream(res.data),
           mimeType: (res.headers['content-type'] as string) || 'video/mp4',
           contentLength: res.headers['content-length'] as string,
         };
@@ -444,7 +453,7 @@ export class InstagramService {
     try {
       const res = await axios.get(url, this.withProxy({ responseType: 'stream', timeout: 25000, headers }));
       return {
-        stream: res.data,
+        stream: this.optimizeStream(res.data),
         mimeType: (res.headers['content-type'] as string) || 'video/mp4',
         contentLength: res.headers['content-length'] as string,
       };
@@ -455,7 +464,7 @@ export class InstagramService {
     // Last resort: direct again without timeout
     const res = await axios.get(url, this.withDirect({ responseType: 'stream', headers }));
     return {
-      stream: res.data,
+      stream: this.optimizeStream(res.data),
       mimeType: (res.headers['content-type'] as string) || 'video/mp4',
       contentLength: res.headers['content-length'] as string,
     };
