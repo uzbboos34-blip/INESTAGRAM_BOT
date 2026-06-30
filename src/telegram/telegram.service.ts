@@ -142,6 +142,16 @@ export class TelegramService implements OnModuleInit, OnModuleDestroy {
     this.bot.start((ctx) => this.sendWelcomeMessage(ctx));
     this.bot.help((ctx) => this.sendWelcomeMessage(ctx));
 
+    // Clear Cache Command (For developer testing)
+    this.bot.command('clear', async (ctx) => {
+      try {
+        await this.databaseService.clearCache();
+        await ctx.reply('Kesh muvaffaqiyatli tozalandi! ✅ (SQLite va Redis bo\'shatildi)');
+      } catch (err: any) {
+        await ctx.reply(`Keshni tozalashda xatolik yuz berdi: ${err.message}`);
+      }
+    });
+
     // Handle text messages (Instagram URLs)
     this.bot.on('text', (ctx) => {
       if (!ctx.chat) return;

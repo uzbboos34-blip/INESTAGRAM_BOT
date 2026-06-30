@@ -163,4 +163,27 @@ export class DatabaseService implements OnModuleInit, OnModuleDestroy {
       }
     }
   }
+
+  async clearCache(): Promise<void> {
+    if (this.db) {
+      try {
+        await this.db.run('DELETE FROM instagram_cache');
+        this.logger.log('SQLite database cache successfully cleared.');
+      } catch (err) {
+        this.logger.error(`Failed to clear SQLite cache: ${err.message}`);
+      }
+    }
+
+    if (this.redis) {
+      try {
+        const keys = await this.redis.keys('ig_cache:*');
+        if (keys.length > 0) {
+          await this.redis.del(...keys);
+        }
+        this.logger.log('Redis cache successfully cleared.');
+      } catch (err) {
+        this.logger.warn(`Failed to clear Redis cache: ${err.message}`);
+      }
+    }
+  }
 }
