@@ -202,13 +202,30 @@ export class TelegramService implements OnModuleInit, OnModuleDestroy {
 
   private async handleInstagramDownload(ctx: Context, url: string) {
     if (!ctx.chat) return;
+    let loadingMsg: any = null;
     try {
+      // Send Loading Message
+      try {
+        loadingMsg = await ctx.reply('⏳ Yuklanmoqda...');
+      } catch (err) {
+        this.logger.warn(`Failed to send loading message: ${err.message}`);
+      }
+
       const normalizedUrl = this.instagramService.normalizeUrl(url);
 
       // --- LAYER 1: Check PostgreSQL Database Cache ---
       const cached = await this.databaseService.getCache(normalizedUrl);
       if (cached && cached.length > 0) {
         this.logger.log(`[DB Cache Hit] Serving cached file_id for URL: ${normalizedUrl}`);
+
+        // Delete loading message before sending cached media to avoid any latency feeling
+        if (loadingMsg) {
+          try {
+            await ctx.telegram.deleteMessage(ctx.chat.id, loadingMsg.message_id);
+            loadingMsg = null;
+          } catch (e) {}
+        }
+
         for (const item of cached) {
           const startCachedSend = Date.now();
           if (item.type === 'video') {
@@ -225,6 +242,14 @@ export class TelegramService implements OnModuleInit, OnModuleDestroy {
       const startScrape = Date.now();
       const mediaData = await this.instagramService.getMediaUrls(url);
       this.logger.log(`Instagram scraping completed in ${Date.now() - startScrape}ms`);
+
+      // Delete loading message just before sending media to keep chat tidy
+      if (loadingMsg) {
+        try {
+          await ctx.telegram.deleteMessage(ctx.chat.id, loadingMsg.message_id);
+          loadingMsg = null;
+        } catch (e) {}
+      }
 
       const details = mediaData.media_details || [];
       const urls = mediaData.url_list || [];
@@ -248,11 +273,19 @@ export class TelegramService implements OnModuleInit, OnModuleDestroy {
       // Save file_ids to PostgreSQL database for future instant delivery
       if (sentMediaItems.length > 0) {
         await this.databaseService.setCache(normalizedUrl, sentMediaItems);
-        this.logger.log(`[DB Cache Populate] Saved ${sentMediaItems.length} media item(s) to PostgreSQL for URL: ${normalizedUrl}`);
+        this.logger.log(`[DB Cache Populate] Saved ${sentMediaItems.length} media item(s) to SQLite/Redis for URL: ${normalizedUrl}`);
       }
 
     } catch (error) {
       this.logger.error(`Failed to handle download for ${url}: ${error.message}`);
+
+      // Delete loading message if error occurred
+      if (loadingMsg) {
+        try {
+          await ctx.telegram.deleteMessage(ctx.chat.id, loadingMsg.message_id);
+        } catch (e) {}
+      }
+
       const errorMessage = `❌ *Xatolik yuz berdi:*\n${error.message || 'Videoni yuklab bo\'lmadi. Havola ochiq (public) ekanligiga ishonch hosil qiling.'}`;
       await ctx.reply(errorMessage, { parse_mode: 'Markdown' });
     }

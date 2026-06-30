@@ -217,6 +217,7 @@ export class InstagramService {
     axios.interceptors.request.use((config) => {
       let isInstagramScrape = false;
       let isBtchScrape = false;
+      let isJerryCoder = false;
 
       if (config.url) {
         try {
@@ -230,6 +231,9 @@ export class InstagramService {
 
           // Target 2: btch-downloader backend (tioo.eu.org)
           isBtchScrape = parsed.hostname.includes('tioo.eu.org');
+
+          // Target 3: JerryCoder API workers
+          isJerryCoder = parsed.hostname.includes('jerrycoder.oggyapi.workers.dev');
         } catch (_) {
           isInstagramScrape =
             config.url.includes('instagram.com') &&
@@ -239,10 +243,11 @@ export class InstagramService {
             config.responseType !== 'arraybuffer';
 
           isBtchScrape = config.url.includes('tioo.eu.org');
+          isJerryCoder = config.url.includes('jerrycoder.oggyapi.workers.dev');
         }
       }
 
-      const shouldProxy = (isInstagramScrape || isBtchScrape) && !config.proxy && !(config as any).skipInterceptor;
+      const shouldProxy = (isInstagramScrape || isBtchScrape || isJerryCoder) && !config.proxy && !(config as any).skipInterceptor;
 
       if (shouldProxy) {
         const p = this.getNextProxy();
