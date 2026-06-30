@@ -27,28 +27,45 @@ function customDnsLookup(
   const cb = typeof options === 'function' ? options : callback;
   if (!cb) return;
 
+  const opts = typeof options === 'object' ? options : {};
+  const reqFamily = typeof options === 'number' ? options : (opts.family || 0);
+
   const now = Date.now();
-  const cached = dnsCache.get(hostname);
+  const cacheKey = `${hostname}:${reqFamily}`;
+  const cached = dnsCache.get(cacheKey);
   if (cached && cached.expires > now) {
     return cb(null, cached.address, cached.family);
   }
 
-  // Force IPv4 only (family: 4) to bypass slow IPv6 resolution
-  dns.resolve4(hostname, (err, addresses) => {
-    if (err || !addresses || addresses.length === 0) {
-      // Fallback to standard resolver for local/localhost/internal addresses
-      return (dns.lookup as any)(hostname, { family: 4 }, (lookupErr: any, address: any, family: any) => {
-        if (lookupErr) return cb(lookupErr, null, null);
-        dnsCache.set(hostname, { address, family, expires: Date.now() + 5000 }); // Cache resolution errors for 5s
-        cb(null, address, family);
-      });
-    }
-
-    const address = addresses[0];
-    const family = 4;
-    dnsCache.set(hostname, { address, family, expires: now + DNS_TTL });
-    cb(null, address, family);
-  });
+  if (reqFamily === 6) {
+    // Handle IPv6 resolution requests
+    dns.resolve6(hostname, (err, addresses) => {
+      if (err || !addresses || addresses.length === 0) {
+        return (dns.lookup as any)(hostname, { ...opts, family: 6 }, (lookupErr: any, address: any, family: any) => {
+          if (lookupErr) return cb(lookupErr, null, null);
+          dnsCache.set(cacheKey, { address, family, expires: Date.now() + 5000 });
+          cb(null, address, family);
+        });
+      }
+      const address = addresses[0];
+      dnsCache.set(cacheKey, { address, family: 6, expires: now + DNS_TTL });
+      cb(null, address, 6);
+    });
+  } else {
+    // Default to IPv4 resolution (resolve4) for family 4 or 0 (any)
+    dns.resolve4(hostname, (err, addresses) => {
+      if (err || !addresses || addresses.length === 0) {
+        return (dns.lookup as any)(hostname, { ...opts, family: 4 }, (lookupErr: any, address: any, family: any) => {
+          if (lookupErr) return cb(lookupErr, null, null);
+          dnsCache.set(cacheKey, { address, family, expires: Date.now() + 5000 });
+          cb(null, address, family);
+        });
+      }
+      const address = addresses[0];
+      dnsCache.set(cacheKey, { address, family: 4, expires: now + DNS_TTL });
+      cb(null, address, 4);
+    });
+  }
 }
 
 export interface MediaDetail {
@@ -76,26 +93,28 @@ interface ProxyDetails {
 export class InstagramService {
   private readonly logger = new Logger(InstagramService.name);
 
-  // High performance TCP Keep-Alive Agents
+  // High performance TCP Keep-Alive Agents forcing IPv4 (family: 4)
   private readonly httpAgent = new http.Agent({
     keepAlive: true,
     keepAliveMsecs: 1000, // TCP Keep-Alive delay set to 1 second
+    family: 4,            // Force IPv4 locally to speed up connection handshakes
     maxSockets: 100,
     maxFreeSockets: 10,
     timeout: 15000,
     scheduling: 'fifo',
-    noDelay: true, // Disable Nagle's TCP algorithm to send packets instantly
+    noDelay: true,        // Disable Nagle's TCP algorithm to send packets instantly
     lookup: customDnsLookup,
   });
 
   private readonly httpsAgent = new https.Agent({
     keepAlive: true,
     keepAliveMsecs: 1000, // TCP Keep-Alive delay set to 1 second
+    family: 4,            // Force IPv4
     maxSockets: 100,
     maxFreeSockets: 10,
     timeout: 15000,
     scheduling: 'fifo',
-    noDelay: true, // Disable Nagle's TCP algorithm
+    noDelay: true,        // Disable Nagle's TCP algorithm
     lookup: customDnsLookup,
   });
 
