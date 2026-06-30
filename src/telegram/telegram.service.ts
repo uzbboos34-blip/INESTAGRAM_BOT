@@ -17,7 +17,7 @@ class TaskQueue {
   private running = 0;
   private queue: (() => Promise<void>)[] = [];
 
-  constructor(private readonly concurrency: number) {}
+  constructor(private readonly concurrency: number) { }
 
   run<T>(task: () => Promise<T>): Promise<T> {
     return new Promise<T>((resolve, reject) => {
@@ -51,6 +51,7 @@ class TaskQueue {
 export class TelegramService implements OnModuleInit, OnModuleDestroy {
   private readonly logger = new Logger(TelegramService.name);
   private bot: Telegraf;
+  private webhookCallbackFn: any = null;
 
   // 8 concurrent tasks: mostly I/O-bound (network), safe for Render 512MB free tier
   private readonly executionQueue = new TaskQueue(8);
@@ -59,7 +60,7 @@ export class TelegramService implements OnModuleInit, OnModuleDestroy {
     private readonly configService: ConfigService,
     private readonly instagramService: InstagramService,
     private readonly databaseService: DatabaseService,
-  ) {}
+  ) { }
 
   async onModuleInit() {
     const token = this.configService.get<string>('TELEGRAM_BOT_TOKEN');
@@ -71,27 +72,61 @@ export class TelegramService implements OnModuleInit, OnModuleDestroy {
     this.bot = new Telegraf(token);
     this.setupHandlers();
 
-    // Wait 5 seconds before launching to let the old Render instance fully
-    // release its getUpdates long-poll lock and avoid 409 Conflict errors.
-    this.logger.log('Waiting 5s for previous instance to release Telegram polling lock...');
-    await new Promise(resolve => setTimeout(resolve, 5000));
-
-    const launch = async (attempt = 1) => {
-      try {
-        await this.bot.launch();
-        this.logger.log('Telegram Bot successfully launched!');
-      } catch (err: any) {
-        if (err?.response?.error_code === 409 && attempt <= 5) {
-          const delay = attempt * 3000;
-          this.logger.warn(`409 Conflict on attempt ${attempt}. Retrying in ${delay / 1000}s...`);
-          await new Promise(r => setTimeout(r, delay));
-          return launch(attempt + 1);
+    const useWebhook = this.configService.get<string>('USE_WEBHOOK') === 'true';
+    if (useWebhook) {
+      const webhookDomain = this.configService.get<string>('WEBHOOK_DOMAIN');
+      if (webhookDomain) {
+        const webhookUrl = `${webhookDomain}/telegram/webhook`;
+        try {
+          this.webhookCallbackFn = this.bot.webhookCallback('/telegram/webhook');
+          await this.bot.telegram.setWebhook(webhookUrl);
+          this.logger.log(`Telegram Bot successfully configured in Webhook mode on: ${webhookUrl}`);
+        } catch (err: any) {
+          this.logger.error(`Failed to configure Telegram Webhook: ${err.message}`);
         }
-        this.logger.error('Failed to launch Telegram Bot:', err);
+      } else {
+        this.logger.error('USE_WEBHOOK is set to true, but WEBHOOK_DOMAIN is not defined in .env!');
       }
-    };
+    } else {
+      // Long Polling Mode (Fallback / Local Dev)
+      // Wait 5 seconds before launching to let the old Render instance fully
+      // release its getUpdates long-poll lock and avoid 409 Conflict errors.
+      this.logger.log('USE_WEBHOOK is false/unset. Launching bot in Long Polling mode...');
+      this.logger.log('Waiting 5s for previous instance to release Telegram polling lock...');
+      await new Promise(resolve => setTimeout(resolve, 5000));
 
-    launch();
+      const launch = async (attempt = 1) => {
+        try {
+          await this.bot.launch();
+          this.logger.log('Telegram Bot successfully launched in Long Polling mode!');
+        } catch (err: any) {
+          if (err?.response?.error_code === 409 && attempt <= 5) {
+            const delay = attempt * 3000;
+            this.logger.warn(`409 Conflict on attempt ${attempt}. Retrying in ${delay / 1000}s...`);
+            await new Promise(r => setTimeout(r, delay));
+            return launch(attempt + 1);
+          }
+          this.logger.error('Failed to launch Telegram Bot polling:', err);
+        }
+      };
+
+      launch();
+    }
+  }
+
+  async handleWebhookRequest(req: any, res: any) {
+    if (this.webhookCallbackFn) {
+      try {
+        await this.webhookCallbackFn(req, res);
+      } catch (err: any) {
+        this.logger.error(`Error processing webhook callback payload: ${err.message}`);
+        if (!res.headersSent) {
+          res.status(500).send('Webhook parsing error');
+        }
+      }
+    } else {
+      res.status(400).send('Webhook handler is not initialized');
+    }
   }
 
   onModuleDestroy() {
@@ -130,7 +165,7 @@ export class TelegramService implements OnModuleInit, OnModuleDestroy {
   }
 
   private async sendWelcomeMessage(ctx: Context) {
-    const welcomeText = 
+    const welcomeText =
       `👋 Salom, *${ctx.from?.first_name || "do'st"}*!\n\n` +
       `Men Instagram-dan video va rasmlarni yuklab beruvchi botman.\n\n` +
       `📥 Yuklab olish uchun menga biror **Instagram link** (Reels, Post, IGTV) yuboring.`;
@@ -177,7 +212,7 @@ export class TelegramService implements OnModuleInit, OnModuleDestroy {
       const startScrape = Date.now();
       const mediaData = await this.instagramService.getMediaUrls(url);
       this.logger.log(`Instagram scraping completed in ${Date.now() - startScrape}ms`);
-      
+
       const details = mediaData.media_details || [];
       const urls = mediaData.url_list || [];
       const sentMediaItems: CachedMedia[] = [];
@@ -228,21 +263,21 @@ export class TelegramService implements OnModuleInit, OnModuleDestroy {
       return this.extractFileId(msg);
     } catch (err) {
       this.logger.warn(`Failed to send via direct URL: ${err.message}. Falling back to streaming pipeline...`);
-      
+
       try {
         // --- HIGH SPEED DIRECT STREAMING PIPELINE ---
         const { stream, mimeType, contentLength } = await this.instagramService.downloadMediaStream(cdnUrl);
-        
-        const realIsVideo = 
-          mimeType.toLowerCase().includes('video') || 
-          mimeType.toLowerCase().includes('mp4') || 
+
+        const realIsVideo =
+          mimeType.toLowerCase().includes('video') ||
+          mimeType.toLowerCase().includes('mp4') ||
           detailFilename.endsWith('.mp4');
 
         this.logger.log(`Piping stream to Telegram. mimeType: ${mimeType}. Length: ${contentLength || 'unknown'}`);
 
         const uploadStart = Date.now();
         let msg: any;
-        
+
         // Formulate stream object options with optional knownLength
         const sourceObj: any = {
           source: stream,
