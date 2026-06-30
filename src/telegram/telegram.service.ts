@@ -1,6 +1,6 @@
 import { Injectable, OnModuleInit, OnModuleDestroy, Logger } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
-import { Telegraf, Context } from 'telegraf';
+import { Telegraf, Context, Markup } from 'telegraf';
 import { InstagramService } from '../instagram/instagram.service';
 import { DatabaseService } from '../database/database.service';
 
@@ -152,6 +152,57 @@ export class TelegramService implements OnModuleInit, OnModuleDestroy {
       }
     });
 
+    // Callback Query Handler for Inline Buttons
+    this.bot.on('callback_query', async (ctx) => {
+      const data = (ctx.callbackQuery as any).data;
+      if (!data) return;
+
+      if (data === 'del') {
+        try {
+          await ctx.deleteMessage();
+          await ctx.answerCbQuery('Fayl o\'chirildi! 🗑️');
+        } catch (err: any) {
+          this.logger.warn(`Failed to delete message via callback: ${err.message}`);
+          await ctx.answerCbQuery('Xabar o\'chirilishi mumkin emas.');
+        }
+      } else if (data.startsWith('desc:')) {
+        const shortcode = data.split(':')[1];
+        await ctx.answerCbQuery('Tavsif yuklanmoqda... ⏳');
+
+        try {
+          const caption = await this.instagramService.getPostCaption(shortcode);
+          if (caption) {
+            await ctx.reply(`📝 *Video tavsifi:*\n\n${caption}`, { parse_mode: 'Markdown' });
+          } else {
+            await ctx.reply('📝 *Tavsif:*\n\nInstagram videodan matnli tavsif olinmadi (post muallifi matn yozmagan yoki havola shaxsiy).', { parse_mode: 'Markdown' });
+          }
+        } catch (err: any) {
+          await ctx.reply('❌ Tavsifni yuklab bo\'lmadi.');
+        }
+      } else if (data.startsWith('mp3:')) {
+        const shortcode = data.split(':')[1];
+        await ctx.answerCbQuery('Audio (MP3) tayyorlanmoqda... ⏳');
+
+        try {
+          const instagramUrl = `https://www.instagram.com/reel/${shortcode}/`;
+          const mediaData = await this.instagramService.getMediaUrls(instagramUrl);
+          const cdnUrl = mediaData.url_list?.[0];
+          if (cdnUrl) {
+            const { stream } = await this.instagramService.downloadMediaStream(cdnUrl);
+            await ctx.replyWithAudio({ source: stream, filename: `${shortcode}.mp3` }, {
+              title: 'Audio Track',
+              performer: 'Instagram Bot',
+            });
+          } else {
+            throw new Error('Video havola topilmadi.');
+          }
+        } catch (err: any) {
+          this.logger.error(`Failed to process MP3 callback: ${err.message}`);
+          await ctx.reply(`❌ Audioni yuklab bo'lmadi: ${err.message}`);
+        }
+      }
+    });
+
     // Handle text messages (Instagram URLs)
     this.bot.on('text', (ctx) => {
       if (!ctx.chat) return;
@@ -212,8 +263,19 @@ export class TelegramService implements OnModuleInit, OnModuleDestroy {
       }
 
       const normalizedUrl = this.instagramService.normalizeUrl(url);
+      const shortcode = this.instagramService.extractShortcode(url);
 
-      // --- LAYER 1: Check PostgreSQL Database Cache ---
+      const extra = Markup.inlineKeyboard([
+        [
+          Markup.button.callback('🗑️ O\'chirish', 'del'),
+          Markup.button.callback('📝 Tavsif', `desc:${shortcode}`),
+        ],
+        [
+          Markup.button.callback('🎵 MP3', `mp3:${shortcode}`),
+        ]
+      ]).reply_markup;
+
+      // --- LAYER 1: Check PostgreSQL/SQLite Database Cache ---
       const cached = await this.databaseService.getCache(normalizedUrl);
       if (cached && cached.length > 0) {
         this.logger.log(`[DB Cache Hit] Serving cached file_id for URL: ${normalizedUrl}`);
@@ -229,9 +291,9 @@ export class TelegramService implements OnModuleInit, OnModuleDestroy {
         for (const item of cached) {
           const startCachedSend = Date.now();
           if (item.type === 'video') {
-            await ctx.replyWithVideo(item.fileId, { caption: 'Downloaded via @insta_media_load_bot' });
+            await ctx.replyWithVideo(item.fileId, { caption: '✅ Video tayyor!', reply_markup: extra });
           } else {
-            await ctx.replyWithPhoto(item.fileId, { caption: 'Downloaded via @insta_media_load_bot' });
+            await ctx.replyWithPhoto(item.fileId, { caption: '✅ Rasm tayyor!', reply_markup: extra });
           }
           this.logger.log(`[Cache Delivery] Cached item sent to user in ${Date.now() - startCachedSend}ms`);
         }
@@ -257,20 +319,20 @@ export class TelegramService implements OnModuleInit, OnModuleDestroy {
 
       if (details.length > 0) {
         for (const detail of details) {
-          const sent = await this.sendMediaDetail(ctx, detail);
+          const sent = await this.sendMediaDetail(ctx, detail, shortcode);
           if (sent) sentMediaItems.push(sent);
         }
       } else if (urls.length > 0) {
         for (const mediaUrl of urls) {
           const isVideo = mediaUrl.includes('.mp4') || mediaUrl.includes('video') || mediaUrl.includes('&mime=video');
-          const sent = await this.sendMediaByUrl(ctx, mediaUrl, isVideo ? 'video' : 'image');
+          const sent = await this.sendMediaByUrl(ctx, mediaUrl, isVideo ? 'video' : 'image', shortcode);
           if (sent) sentMediaItems.push(sent);
         }
       } else {
         throw new Error('Hech qanday media fayli topilmadi.');
       }
 
-      // Save file_ids to PostgreSQL database for future instant delivery
+      // Save file_ids to database for future instant delivery
       if (sentMediaItems.length > 0) {
         await this.databaseService.setCache(normalizedUrl, sentMediaItems);
         this.logger.log(`[DB Cache Populate] Saved ${sentMediaItems.length} media item(s) to SQLite/Redis for URL: ${normalizedUrl}`);
@@ -291,19 +353,29 @@ export class TelegramService implements OnModuleInit, OnModuleDestroy {
     }
   }
 
-  private async sendMediaDetail(ctx: Context, detail: any): Promise<CachedMedia | null> {
+  private async sendMediaDetail(ctx: Context, detail: any, shortcode: string): Promise<CachedMedia | null> {
     const cdnUrl = detail.url;
     const detailFilename = (detail.filename || '').toLowerCase();
     const isVideo = detail.type === 'video' || detailFilename.endsWith('.mp4') || cdnUrl.toLowerCase().includes('.mp4');
+
+    const extra = Markup.inlineKeyboard([
+      [
+        Markup.button.callback('🗑️ O\'chirish', 'del'),
+        Markup.button.callback('📝 Tavsif', `desc:${shortcode}`),
+      ],
+      [
+        Markup.button.callback('🎵 MP3', `mp3:${shortcode}`),
+      ]
+    ]).reply_markup;
 
     const startDirectUrlSend = Date.now();
     try {
       this.logger.log(`Attempting to send media directly by URL to speed up delivery...`);
       let msg: any;
       if (isVideo) {
-        msg = await ctx.replyWithVideo(cdnUrl, { caption: 'Downloaded via @insta_media_load_bot' });
+        msg = await ctx.replyWithVideo(cdnUrl, { caption: '✅ Video tayyor!', reply_markup: extra });
       } else {
-        msg = await ctx.replyWithPhoto(cdnUrl, { caption: 'Downloaded via @insta_media_load_bot' });
+        msg = await ctx.replyWithPhoto(cdnUrl, { caption: '✅ Rasm tayyor!', reply_markup: extra });
       }
       this.logger.log(`Direct URL send succeeded in ${Date.now() - startDirectUrlSend}ms.`);
       return this.extractFileId(msg);
@@ -334,27 +406,38 @@ export class TelegramService implements OnModuleInit, OnModuleDestroy {
         }
 
         if (realIsVideo) {
-          msg = await ctx.replyWithVideo(sourceObj, { caption: 'Downloaded via @insta_media_load_bot' });
+          msg = await ctx.replyWithVideo(sourceObj, { caption: '✅ Video tayyor!', reply_markup: extra });
         } else {
-          msg = await ctx.replyWithPhoto(sourceObj, { caption: 'Downloaded via @insta_media_load_bot' });
+          msg = await ctx.replyWithPhoto(sourceObj, { caption: '✅ Rasm tayyor!', reply_markup: extra });
         }
 
         this.logger.log(`Telegram upload pipeline completed in ${Date.now() - uploadStart}ms`);
         return this.extractFileId(msg);
       } catch (fallbackErr) {
         this.logger.error(`Streaming pipeline failed: ${fallbackErr.message}`);
-        return await this.sendMediaByUrl(ctx, cdnUrl, isVideo ? 'video' : 'image');
+        return await this.sendMediaByUrl(ctx, cdnUrl, isVideo ? 'video' : 'image', shortcode);
       }
     }
   }
 
-  private async sendMediaByUrl(ctx: Context, url: string, type: 'video' | 'image'): Promise<CachedMedia | null> {
+  private async sendMediaByUrl(ctx: Context, url: string, type: 'video' | 'image', shortcode: string): Promise<CachedMedia | null> {
     const startSend = Date.now();
     let msg: any;
+
+    const extra = Markup.inlineKeyboard([
+      [
+        Markup.button.callback('🗑️ O\'chirish', 'del'),
+        Markup.button.callback('📝 Tavsif', `desc:${shortcode}`),
+      ],
+      [
+        Markup.button.callback('🎵 MP3', `mp3:${shortcode}`),
+      ]
+    ]).reply_markup;
+
     if (type === 'video') {
-      msg = await ctx.replyWithVideo(url, { caption: 'Downloaded via @insta_media_load_bot' });
+      msg = await ctx.replyWithVideo(url, { caption: '✅ Video tayyor!', reply_markup: extra });
     } else {
-      msg = await ctx.replyWithPhoto(url, { caption: 'Downloaded via @insta_media_load_bot' });
+      msg = await ctx.replyWithPhoto(url, { caption: '✅ Rasm tayyor!', reply_markup: extra });
     }
     this.logger.log(`SendMediaByUrl finished in ${Date.now() - startSend}ms`);
     return this.extractFileId(msg);

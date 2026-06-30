@@ -497,4 +497,38 @@ export class InstagramService {
       contentLength: res.headers['content-length'] as string,
     };
   }
+
+  extractShortcode(url: string): string {
+    const match = url.match(/\/(p|reel|tv|reels)\/([A-Za-z0-9_-]+)/i);
+    return match ? match[2] : '';
+  }
+
+  async getPostCaption(shortcode: string): Promise<string | null> {
+    const url = `https://www.instagram.com/p/${shortcode}/`;
+    try {
+      const res = await axios.get(url, {
+        headers: {
+          'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+          'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
+          'Accept-Language': 'en-US,en;q=0.5',
+        },
+        timeout: 5000,
+      });
+      const html = res.data;
+      const ogMatch = html.match(/<meta[^>]*property=["']og:description["'][^>]*content=["']([^"']+)["']/i) ||
+                     html.match(/<meta[^>]*content=["']([^"']+)["'][^>]*property=["']og:description["']/i);
+      if (ogMatch && ogMatch[1]) {
+        let desc = ogMatch[1];
+        const cleanIdx = desc.indexOf('on Instagram: "');
+        if (cleanIdx !== -1) {
+          desc = desc.substring(cleanIdx + 15);
+          if (desc.endsWith('"')) desc = desc.slice(0, -1);
+        }
+        return desc.replace(/&quot;/g, '"').replace(/&amp;/g, '&').replace(/&#39;/g, "'").trim();
+      }
+    } catch (err) {
+      this.logger.warn(`Failed to fetch caption for ${shortcode}: ${err.message}`);
+    }
+    return null;
+  }
 }
