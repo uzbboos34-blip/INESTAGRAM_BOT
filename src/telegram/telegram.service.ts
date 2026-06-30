@@ -398,14 +398,29 @@ export class TelegramService implements OnModuleInit, OnModuleDestroy {
         this.logger.log(`[DB Cache Populate] Saved ${sentMediaItems.length} media item(s) to SQLite/Redis for shortcode: ${shortcode}`);
       }
 
-    } catch (error) {
+    } catch (error: any) {
       this.logger.error(`Failed to handle download for ${url}: ${error.message}`);
 
-      // Delete loading message if error occurred
       if (loadingMsg) {
         try {
           await ctx.telegram.deleteMessage(ctx.chat.id, loadingMsg.message_id);
         } catch (e) {}
+      }
+
+      if (error.message.startsWith('FILE_TOO_LARGE:')) {
+        const parts = error.message.split(':');
+        const lengthBytes = parseInt(parts[1], 10);
+        const cdnUrl = parts.slice(2).join(':');
+        const sizeMb = lengthBytes > 0 ? (lengthBytes / (1024 * 1024)).toFixed(1) : '50+';
+
+        const largeFileMessage =
+          `⚠️ *Video hajmi juda katta!* (${sizeMb} MB)\n\n` +
+          `Telegram Bot API botlar orqali maksimal *50 MB* gacha bo'lgan fayllarni yuklashga ruxsat beradi.\n\n` +
+          `Siz ushbu videoni quyidagi havola orqali brauzeringizda to'g'ridan-to'g'ri yuklab olishingiz mumkin:\n` +
+          `📥 [Videoni yuklab olish](${cdnUrl})`;
+
+        await ctx.reply(largeFileMessage, { parse_mode: 'Markdown' });
+        return;
       }
 
       const errorMessage = `❌ *Xatolik yuz berdi:*\n${error.message || 'Videoni yuklab bo\'lmadi. Havola ochiq (public) ekanligiga ishonch hosil qiling.'}`;
@@ -439,12 +454,17 @@ export class TelegramService implements OnModuleInit, OnModuleDestroy {
       }
       this.logger.log(`Direct URL send succeeded in ${Date.now() - startDirectUrlSend}ms.`);
       return this.extractFileId(msg);
-    } catch (err) {
+    } catch (err: any) {
       this.logger.warn(`Failed to send via direct URL: ${err.message}. Falling back to streaming pipeline...`);
 
       try {
         // --- HIGH SPEED DIRECT STREAMING PIPELINE ---
         const { stream, mimeType, contentLength } = await this.instagramService.downloadMediaStream(cdnUrl);
+
+        // Pre-check size limit of 50MB
+        if (contentLength && parseInt(contentLength, 10) > 50 * 1024 * 1024) {
+          throw new Error(`FILE_TOO_LARGE:${contentLength}:${cdnUrl}`);
+        }
 
         const realIsVideo =
           mimeType.toLowerCase().includes('video') ||
@@ -456,7 +476,6 @@ export class TelegramService implements OnModuleInit, OnModuleDestroy {
         const uploadStart = Date.now();
         let msg: any;
 
-        // Formulate stream object options with optional knownLength
         const sourceObj: any = {
           source: stream,
           filename: detail.filename || (realIsVideo ? 'video.mp4' : 'image.jpg'),
@@ -465,15 +484,28 @@ export class TelegramService implements OnModuleInit, OnModuleDestroy {
           sourceObj.knownLength = parseInt(contentLength, 10);
         }
 
-        if (realIsVideo) {
-          msg = await ctx.replyWithVideo(sourceObj, { caption: '✅ Video tayyor!', reply_markup: extra });
-        } else {
-          msg = await ctx.replyWithPhoto(sourceObj, { caption: '✅ Rasm tayyor!', reply_markup: extra });
+        try {
+          if (realIsVideo) {
+            msg = await ctx.replyWithVideo(sourceObj, { caption: '✅ Video tayyor!', reply_markup: extra });
+          } else {
+            msg = await ctx.replyWithPhoto(sourceObj, { caption: '✅ Rasm tayyor!', reply_markup: extra });
+          }
+        } catch (uploadErr: any) {
+          // If Telegram API rejects it during upload with size limits:
+          if (uploadErr.message?.includes('413') || uploadErr.message?.includes('too large') || uploadErr.message?.includes('Request Entity Too Large')) {
+            throw new Error(`FILE_TOO_LARGE:${contentLength || 0}:${cdnUrl}`);
+          }
+          throw uploadErr;
         }
 
         this.logger.log(`Telegram upload pipeline completed in ${Date.now() - uploadStart}ms`);
         return this.extractFileId(msg);
-      } catch (fallbackErr) {
+      } catch (fallbackErr: any) {
+        // If it's our custom size-limit error, bubble it up directly to handleInstagramDownload!
+        if (fallbackErr.message?.startsWith('FILE_TOO_LARGE:')) {
+          throw fallbackErr;
+        }
+
         this.logger.error(`Streaming pipeline failed: ${fallbackErr.message}`);
         return await this.sendMediaByUrl(ctx, cdnUrl, isVideo ? 'video' : 'image', shortcode);
       }
@@ -494,12 +526,19 @@ export class TelegramService implements OnModuleInit, OnModuleDestroy {
       ]
     ]).reply_markup;
 
-    if (type === 'video') {
-      msg = await ctx.replyWithVideo(url, { caption: '✅ Video tayyor!', reply_markup: extra });
-    } else {
-      msg = await ctx.replyWithPhoto(url, { caption: '✅ Rasm tayyor!', reply_markup: extra });
+    try {
+      if (type === 'video') {
+        msg = await ctx.replyWithVideo(url, { caption: '✅ Video tayyor!', reply_markup: extra });
+      } else {
+        msg = await ctx.replyWithPhoto(url, { caption: '✅ Rasm tayyor!', reply_markup: extra });
+      }
+      this.logger.log(`SendMediaByUrl finished in ${Date.now() - startSend}ms`);
+      return this.extractFileId(msg);
+    } catch (err: any) {
+      if (err.message?.includes('413') || err.message?.includes('too large') || err.message?.includes('Request Entity Too Large') || err.message?.includes('HTTP URL content')) {
+        throw new Error(`FILE_TOO_LARGE:0:${url}`);
+      }
+      throw err;
     }
-    this.logger.log(`SendMediaByUrl finished in ${Date.now() - startSend}ms`);
-    return this.extractFileId(msg);
   }
 }
