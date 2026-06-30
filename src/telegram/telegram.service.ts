@@ -167,12 +167,11 @@ export class TelegramService implements OnModuleInit, OnModuleDestroy {
         }
       } else if (data.startsWith('desc:')) {
         const shortcode = data.split(':')[1];
-        const instagramUrl = `https://www.instagram.com/reel/${shortcode}/`;
         await ctx.answerCbQuery('Tavsif yuklanmoqda... ⏳');
 
         try {
-          // Check cache first
-          const cachedCaption = await this.databaseService.getCaption(instagramUrl);
+          // Check cache first using shortcode
+          const cachedCaption = await this.databaseService.getCaption(shortcode);
           if (cachedCaption) {
             await ctx.reply(cachedCaption, { parse_mode: 'Markdown' });
             return;
@@ -181,7 +180,7 @@ export class TelegramService implements OnModuleInit, OnModuleDestroy {
           // Fallback to scraping
           const caption = await this.instagramService.getPostCaption(shortcode);
           if (caption) {
-            await this.databaseService.setCaption(instagramUrl, caption);
+            await this.databaseService.setCaption(shortcode, caption);
             await ctx.reply(caption, { parse_mode: 'Markdown' });
           } else {
             await ctx.reply('📝 *Tavsif:*\n\nInstagram videodan matnli tavsif olinmadi (post muallifi matn yozmagan yoki havola shaxsiy).', { parse_mode: 'Markdown' });
@@ -191,22 +190,22 @@ export class TelegramService implements OnModuleInit, OnModuleDestroy {
         }
       } else if (data.startsWith('mp3:')) {
         const shortcode = data.split(':')[1];
-        const instagramUrl = `https://www.instagram.com/reel/${shortcode}/`;
         await ctx.answerCbQuery('Audio (MP3) tayyorlanmoqda... ⏳');
 
         try {
-          // Check Cache First (Serve audio file_id instantly in 0.01 seconds!)
-          const cached = await this.databaseService.getCache(instagramUrl);
+          // Check Cache First using shortcode (Serve audio file_id instantly in 0.01 seconds!)
+          const cached = await this.databaseService.getCache(shortcode);
           if (cached) {
             const cachedAudio = cached.find(i => i.type === 'audio');
             if (cachedAudio) {
-              this.logger.log(`[Instant Audio Cache Hit] Serving cached audio fileId for ${instagramUrl}`);
+              this.logger.log(`[Instant Audio Cache Hit] Serving cached audio fileId for shortcode: ${shortcode}`);
               await ctx.replyWithAudio(cachedAudio.fileId);
               return;
             }
           }
 
-          // Miss: Download and stream as audio
+          // Miss: Download and stream as audio (using standard URL structure)
+          const instagramUrl = `https://www.instagram.com/reel/${shortcode}/`;
           const mediaData = await this.instagramService.getMediaUrls(instagramUrl);
           const cdnUrl = mediaData.url_list?.[0];
           if (cdnUrl) {
@@ -221,8 +220,8 @@ export class TelegramService implements OnModuleInit, OnModuleDestroy {
             if (audioFileId) {
               const updatedCache = cached ? [...cached] : [];
               updatedCache.push({ type: 'audio', fileId: audioFileId });
-              await this.databaseService.setCache(instagramUrl, updatedCache);
-              this.logger.log(`[Audio Cache Populate] Saved audio file_id to database for URL: ${instagramUrl}`);
+              await this.databaseService.setCache(shortcode, updatedCache);
+              this.logger.log(`[Audio Cache Populate] Saved audio file_id to database for shortcode: ${shortcode}`);
             }
           } else {
             throw new Error('Video havola topilmadi.');
@@ -240,14 +239,13 @@ export class TelegramService implements OnModuleInit, OnModuleDestroy {
       const text = ctx.message.text.trim();
 
       if (this.instagramService.isValidUrl(text)) {
-        const normalizedUrl = this.instagramService.normalizeUrl(text);
+        const shortcode = this.instagramService.extractShortcode(text);
 
         try {
-          // CHECK CACHE FIRST (Bypasses queue and delays entirely for instant delivery!)
-          const cached = await this.databaseService.getCache(normalizedUrl);
+          // CHECK CACHE FIRST using shortcode (Bypasses queue and delays entirely for instant delivery!)
+          const cached = await this.databaseService.getCache(shortcode);
           if (cached && cached.length > 0) {
-            this.logger.log(`[Instant DB Cache Hit] Serving cached file_id for URL: ${normalizedUrl}`);
-            const shortcode = this.instagramService.extractShortcode(text);
+            this.logger.log(`[Instant DB Cache Hit] Serving cached file_id for shortcode: ${shortcode}`);
 
             const extra = Markup.inlineKeyboard([
               [
@@ -262,7 +260,7 @@ export class TelegramService implements OnModuleInit, OnModuleDestroy {
             for (const item of cached) {
               if (item.type === 'video') {
                 await ctx.replyWithVideo(item.fileId, { caption: '✅ Video tayyor!', reply_markup: extra });
-              } else {
+              } else if (item.type === 'image') {
                 await ctx.replyWithPhoto(item.fileId, { caption: '✅ Rasm tayyor!', reply_markup: extra });
               }
             }
@@ -325,7 +323,6 @@ export class TelegramService implements OnModuleInit, OnModuleDestroy {
         this.logger.warn(`Failed to send loading message: ${err.message}`);
       }
 
-      const normalizedUrl = this.instagramService.normalizeUrl(url);
       const shortcode = this.instagramService.extractShortcode(url);
 
       const extra = Markup.inlineKeyboard([
@@ -338,10 +335,10 @@ export class TelegramService implements OnModuleInit, OnModuleDestroy {
         ]
       ]).reply_markup;
 
-      // --- LAYER 1: Check PostgreSQL/SQLite Database Cache ---
-      const cached = await this.databaseService.getCache(normalizedUrl);
+      // --- LAYER 1: Check Database Cache using shortcode ---
+      const cached = await this.databaseService.getCache(shortcode);
       if (cached && cached.length > 0) {
-        this.logger.log(`[DB Cache Hit] Serving cached file_id for URL: ${normalizedUrl}`);
+        this.logger.log(`[DB Cache Hit] Serving cached file_id for shortcode: ${shortcode}`);
 
         // Delete loading message before sending cached media to avoid any latency feeling
         if (loadingMsg) {
@@ -395,10 +392,10 @@ export class TelegramService implements OnModuleInit, OnModuleDestroy {
         throw new Error('Hech qanday media fayli topilmadi.');
       }
 
-      // Save file_ids to database for future instant delivery
+      // Save file_ids to database for future instant delivery using shortcode
       if (sentMediaItems.length > 0) {
-        await this.databaseService.setCache(normalizedUrl, sentMediaItems);
-        this.logger.log(`[DB Cache Populate] Saved ${sentMediaItems.length} media item(s) to SQLite/Redis for URL: ${normalizedUrl}`);
+        await this.databaseService.setCache(shortcode, sentMediaItems);
+        this.logger.log(`[DB Cache Populate] Saved ${sentMediaItems.length} media item(s) to SQLite/Redis for shortcode: ${shortcode}`);
       }
 
     } catch (error) {
