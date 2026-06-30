@@ -117,9 +117,9 @@ export class DatabaseService implements OnModuleInit, OnModuleDestroy {
         try {
           const data = JSON.parse(row.media_data);
 
-          // Populate Redis cache asynchronously for next time (Expires in 30 days)
+          // Populate Redis cache asynchronously for next time (Expires in 2 days to keep memory usage under 25MB)
           if (this.redis && data) {
-            this.redis.set(redisKey, row.media_data, 'EX', 30 * 24 * 60 * 60).catch((redisErr) => {
+            this.redis.set(redisKey, row.media_data, 'EX', 2 * 24 * 60 * 60).catch((redisErr) => {
               this.logger.warn(`Failed to populate Redis cache asynchronously: ${redisErr.message}`);
             });
           }
@@ -153,10 +153,10 @@ export class DatabaseService implements OnModuleInit, OnModuleDestroy {
       }
     }
 
-    // 2. Write to Redis with 30-day TTL (fast memory access)
+    // 2. Write to Redis with 2-day TTL (keeps memory size tiny)
     if (this.redis) {
       try {
-        await this.redis.set(redisKey, stringifiedData, 'EX', 30 * 24 * 60 * 60);
+        await this.redis.set(redisKey, stringifiedData, 'EX', 2 * 24 * 60 * 60);
         this.logger.log(`Saved cache to Redis for URL: ${instagramUrl}`);
       } catch (err) {
         this.logger.warn(`Failed to save cache to Redis: ${err.message}`);
