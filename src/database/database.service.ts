@@ -87,8 +87,77 @@ export class DatabaseService implements OnModuleInit, OnModuleDestroy {
     try {
       await this.db.run(query);
       this.logger.log('SQLite cache table instagram_cache initialized/verified.');
+      
+      // Dynamically add caption column if missing
+      try {
+        await this.db.run('ALTER TABLE instagram_cache ADD COLUMN caption TEXT;');
+        this.logger.log('SQLite schema updated with caption column.');
+      } catch (e) {
+        // Column already exists, safe to ignore
+      }
     } catch (err) {
       this.logger.error(`Failed to initialize SQLite schema: ${err.message}`);
+    }
+  }
+
+  async getCaption(instagramUrl: string): Promise<string | null> {
+    const redisKey = `ig_caption:${instagramUrl}`;
+
+    // 1. Try Redis first
+    if (this.redis) {
+      try {
+        const cached = await this.redis.get(redisKey);
+        if (cached) return cached;
+      } catch (err) {
+        this.logger.warn(`Redis getCaption failed: ${err.message}`);
+      }
+    }
+
+    // 2. Fallback to SQLite
+    if (!this.db) return null;
+    const query = 'SELECT caption FROM instagram_cache WHERE instagram_url = ?';
+    try {
+      const row = await this.db.get(query, [instagramUrl]);
+      if (row && row.caption) {
+        if (this.redis) {
+          this.redis.set(redisKey, row.caption, 'EX', 2 * 24 * 60 * 60).catch(() => {});
+        }
+        return row.caption;
+      }
+    } catch (err) {
+      this.logger.error(`Error querying caption from SQLite: ${err.message}`);
+    }
+    return null;
+  }
+
+  async setCaption(instagramUrl: string, caption: string): Promise<void> {
+    const redisKey = `ig_caption:${instagramUrl}`;
+
+    // 1. Write to SQLite
+    if (this.db) {
+      try {
+        // Try to insert OR update existing row
+        await this.db.run(
+          'INSERT INTO instagram_cache (instagram_url, media_data, caption) VALUES (?, ?, ?) ON CONFLICT(instagram_url) DO UPDATE SET caption = excluded.caption',
+          [instagramUrl, '[]', caption]
+        );
+      } catch (err) {
+        // Fallback update if sqlite version lacks ON CONFLICT support
+        try {
+          await this.db.run('UPDATE instagram_cache SET caption = ? WHERE instagram_url = ?', [caption, instagramUrl]);
+        } catch (updateErr) {
+          this.logger.error(`Failed to update caption in SQLite: ${updateErr.message}`);
+        }
+      }
+    }
+
+    // 2. Write to Redis
+    if (this.redis) {
+      try {
+        await this.redis.set(redisKey, caption, 'EX', 2 * 24 * 60 * 60);
+      } catch (err) {
+        this.logger.warn(`Failed to save caption to Redis: ${err.message}`);
+      }
     }
   }
 

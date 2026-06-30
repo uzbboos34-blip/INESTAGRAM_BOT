@@ -167,11 +167,21 @@ export class TelegramService implements OnModuleInit, OnModuleDestroy {
         }
       } else if (data.startsWith('desc:')) {
         const shortcode = data.split(':')[1];
+        const instagramUrl = `https://www.instagram.com/reel/${shortcode}/`;
         await ctx.answerCbQuery('Tavsif yuklanmoqda... ⏳');
 
         try {
+          // Check cache first
+          const cachedCaption = await this.databaseService.getCaption(instagramUrl);
+          if (cachedCaption) {
+            await ctx.reply(`📝 *Video tavsifi:*\n\n${cachedCaption}`, { parse_mode: 'Markdown' });
+            return;
+          }
+
+          // Fallback to scraping
           const caption = await this.instagramService.getPostCaption(shortcode);
           if (caption) {
+            await this.databaseService.setCaption(instagramUrl, caption);
             await ctx.reply(`📝 *Video tavsifi:*\n\n${caption}`, { parse_mode: 'Markdown' });
           } else {
             await ctx.reply('📝 *Tavsif:*\n\nInstagram videodan matnli tavsif olinmadi (post muallifi matn yozmagan yoki havola shaxsiy).', { parse_mode: 'Markdown' });
@@ -181,18 +191,39 @@ export class TelegramService implements OnModuleInit, OnModuleDestroy {
         }
       } else if (data.startsWith('mp3:')) {
         const shortcode = data.split(':')[1];
+        const instagramUrl = `https://www.instagram.com/reel/${shortcode}/`;
         await ctx.answerCbQuery('Audio (MP3) tayyorlanmoqda... ⏳');
 
         try {
-          const instagramUrl = `https://www.instagram.com/reel/${shortcode}/`;
+          // Check Cache First (Serve audio file_id instantly in 0.01 seconds!)
+          const cached = await this.databaseService.getCache(instagramUrl);
+          if (cached) {
+            const cachedAudio = cached.find(i => i.type === 'audio');
+            if (cachedAudio) {
+              this.logger.log(`[Instant Audio Cache Hit] Serving cached audio fileId for ${instagramUrl}`);
+              await ctx.replyWithAudio(cachedAudio.fileId);
+              return;
+            }
+          }
+
+          // Miss: Download and stream as audio
           const mediaData = await this.instagramService.getMediaUrls(instagramUrl);
           const cdnUrl = mediaData.url_list?.[0];
           if (cdnUrl) {
             const { stream } = await this.instagramService.downloadMediaStream(cdnUrl);
-            await ctx.replyWithAudio({ source: stream, filename: `${shortcode}.mp3` }, {
+            const msg = await ctx.replyWithAudio({ source: stream, filename: `${shortcode}.mp3` }, {
               title: 'Audio Track',
               performer: 'Instagram Bot',
             });
+
+            // Extract file_id and cache it in SQLite/Redis
+            const audioFileId = msg?.audio?.file_id;
+            if (audioFileId) {
+              const updatedCache = cached ? [...cached] : [];
+              updatedCache.push({ type: 'audio', fileId: audioFileId });
+              await this.databaseService.setCache(instagramUrl, updatedCache);
+              this.logger.log(`[Audio Cache Populate] Saved audio file_id to database for URL: ${instagramUrl}`);
+            }
           } else {
             throw new Error('Video havola topilmadi.');
           }
