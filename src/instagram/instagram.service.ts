@@ -2,9 +2,50 @@ import { Injectable, Logger } from '@nestjs/common';
 import axios, { AxiosInstance } from 'axios';
 import * as http from 'http';
 import * as https from 'https';
+import * as dns from 'dns';
 
 import { instagram as jerryInstagram } from '@jerrycoder/instagram-api';
 import { igdl } from 'btch-downloader';
+
+// Force Cloudflare and Google DNS resolution for high speed and low latency
+try {
+  dns.setServers(['1.1.1.1', '1.0.0.1', '8.8.8.8', '8.8.4.4']);
+} catch (err) {
+  // Silent fallback if environment prevents DNS server modifications
+}
+
+// In-memory DNS cache to bypass blocking synchronous 'getaddrinfo' lookups
+const dnsCache = new Map<string, { address: string; family: number; expires: number }>();
+const DNS_TTL = 30 * 60 * 1000; // 30-minute DNS cache TTL
+
+function customDnsLookup(
+  hostname: string,
+  options: any,
+  callback: (err: NodeJS.ErrnoException | null, address: any, family: any) => void
+) {
+  const now = Date.now();
+  const cached = dnsCache.get(hostname);
+  if (cached && cached.expires > now) {
+    return callback(null, cached.address, cached.family);
+  }
+
+  // Force IPv4 only (family: 4) to bypass slow IPv6 resolution
+  dns.resolve4(hostname, (err, addresses) => {
+    if (err || !addresses || addresses.length === 0) {
+      // Fallback to standard resolver for local/localhost/internal addresses
+      return (dns.lookup as any)(hostname, { family: 4 }, (lookupErr: any, address: any, family: any) => {
+        if (lookupErr) return callback(lookupErr, null, null);
+        dnsCache.set(hostname, { address, family, expires: Date.now() + 5000 }); // Cache resolution errors for 5s
+        callback(null, address, family);
+      });
+    }
+
+    const address = addresses[0];
+    const family = 4;
+    dnsCache.set(hostname, { address, family, expires: now + DNS_TTL });
+    callback(null, address, family);
+  });
+}
 
 export interface MediaDetail {
   type: 'video' | 'image';
@@ -31,14 +72,34 @@ interface ProxyDetails {
 export class InstagramService {
   private readonly logger = new Logger(InstagramService.name);
 
-  // Keep-alive agents for direct downloads (CDN media files)
-  private readonly httpAgent = new http.Agent({ keepAlive: true, maxSockets: 50 });
-  private readonly httpsAgent = new https.Agent({ keepAlive: true, maxSockets: 50 });
+  // High performance TCP Keep-Alive Agents
+  private readonly httpAgent = new http.Agent({
+    keepAlive: true,
+    maxSockets: 100,
+    maxFreeSockets: 10,
+    timeout: 15000,
+    scheduling: 'fifo',
+    noDelay: true, // Disable Nagle's TCP algorithm to send packets instantly
+    lookup: customDnsLookup,
+  });
+
+  private readonly httpsAgent = new https.Agent({
+    keepAlive: true,
+    maxSockets: 100,
+    maxFreeSockets: 10,
+    timeout: 15000,
+    scheduling: 'fifo',
+    noDelay: true, // Disable Nagle's TCP algorithm
+    lookup: customDnsLookup,
+  });
 
   // Proxy rotation state — track last used index per account to avoid hammering one proxy
   private proxyIndex = 0;
 
   constructor() {
+    // Apply keep-alive agents globally to Axios instance defaults
+    axios.defaults.httpAgent = this.httpAgent;
+    axios.defaults.httpsAgent = this.httpsAgent;
     this.setupAxiosInterceptor();
   }
 

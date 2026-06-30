@@ -1,11 +1,13 @@
 import { Injectable, OnModuleInit, OnModuleDestroy, Logger } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { Pool } from 'pg';
+import Redis from 'ioredis';
 
 @Injectable()
 export class DatabaseService implements OnModuleInit, OnModuleDestroy {
   private readonly logger = new Logger(DatabaseService.name);
   private pool: Pool;
+  private redis: Redis | null = null;
 
   constructor(private readonly configService: ConfigService) {}
 
@@ -26,6 +28,29 @@ export class DatabaseService implements OnModuleInit, OnModuleDestroy {
   }
 
   async onModuleInit() {
+    // --- REDIS CONFIGURATION ---
+    const redisUrl = this.configService.get<string>('REDIS_URL');
+    if (redisUrl) {
+      try {
+        this.redis = new Redis(redisUrl, {
+          maxRetriesPerRequest: 1,
+          connectTimeout: 5000,
+        });
+
+        this.redis.on('connect', () => {
+          this.logger.log('Successfully connected to Redis cache!');
+        });
+
+        this.redis.on('error', (err) => {
+          this.logger.warn(`Redis connection error: ${err.message}`);
+        });
+      } catch (err) {
+        this.logger.warn(`Failed to initialize Redis: ${err.message}`);
+      }
+    } else {
+      this.logger.log('REDIS_URL is not set. Running in PostgreSQL-only cache mode.');
+    }
+
     const connectionString = this.configService.get<string>('DATABASE_URL');
     if (!connectionString) {
       this.logger.error('DATABASE_URL is not defined in .env!');
@@ -74,6 +99,15 @@ export class DatabaseService implements OnModuleInit, OnModuleDestroy {
   }
 
   async onModuleDestroy() {
+    if (this.redis) {
+      try {
+        await this.redis.quit();
+        this.logger.log('Redis connection closed.');
+      } catch (err) {
+        this.logger.warn(`Error closing Redis connection: ${err.message}`);
+      }
+    }
+
     if (this.pool) {
       await this.pool.end();
       this.logger.log('PostgreSQL connection pool closed.');
@@ -97,12 +131,37 @@ export class DatabaseService implements OnModuleInit, OnModuleDestroy {
   }
 
   async getCache(instagramUrl: string): Promise<any[] | null> {
+    const redisKey = `ig_cache:${instagramUrl}`;
+
+    // 1. Try Redis first (sub-millisecond lookup)
+    if (this.redis) {
+      try {
+        const cached = await this.redis.get(redisKey);
+        if (cached) {
+          this.logger.log(`[Redis Cache Hit] Serving cached file_id for URL: ${instagramUrl}`);
+          return JSON.parse(cached);
+        }
+      } catch (err) {
+        this.logger.warn(`Redis getCache failed: ${err.message}`);
+      }
+    }
+
+    // 2. Fall back to PostgreSQL
     if (!this.pool) return null;
     const query = 'SELECT media_data FROM instagram_cache WHERE instagram_url = $1';
     try {
       const res = await this.pool.query(query, [instagramUrl]);
       if (res.rows.length > 0) {
-        return res.rows[0].media_data;
+        const data = res.rows[0].media_data;
+
+        // Populate Redis cache asynchronously for next time (Expires in 30 days)
+        if (this.redis && data) {
+          this.redis.set(redisKey, JSON.stringify(data), 'EX', 30 * 24 * 60 * 60).catch((redisErr) => {
+            this.logger.warn(`Failed to populate Redis cache asynchronously: ${redisErr.message}`);
+          });
+        }
+
+        return data;
       }
     } catch (err) {
       this.logger.error(`Error querying cache from PostgreSQL: ${err.message}`);
@@ -111,18 +170,32 @@ export class DatabaseService implements OnModuleInit, OnModuleDestroy {
   }
 
   async setCache(instagramUrl: string, mediaData: any[]): Promise<void> {
-    if (!this.pool) return;
-    const query = `
-      INSERT INTO instagram_cache (instagram_url, media_data)
-      VALUES ($1, $2)
-      ON CONFLICT (instagram_url)
-      DO UPDATE SET media_data = EXCLUDED.media_data, created_at = CURRENT_TIMESTAMP;
-    `;
-    try {
-      await this.pool.query(query, [instagramUrl, JSON.stringify(mediaData)]);
-      this.logger.log(`Saved cache to PostgreSQL for URL: ${instagramUrl}`);
-    } catch (err) {
-      this.logger.error(`Error saving cache to PostgreSQL: ${err.message}`);
+    const redisKey = `ig_cache:${instagramUrl}`;
+
+    // 1. Write to PostgreSQL (for long-term persistent storage)
+    if (this.pool) {
+      const query = `
+        INSERT INTO instagram_cache (instagram_url, media_data)
+        VALUES ($1, $2)
+        ON CONFLICT (instagram_url)
+        DO UPDATE SET media_data = EXCLUDED.media_data, created_at = CURRENT_TIMESTAMP;
+      `;
+      try {
+        await this.pool.query(query, [instagramUrl, JSON.stringify(mediaData)]);
+        this.logger.log(`Saved cache to PostgreSQL for URL: ${instagramUrl}`);
+      } catch (err) {
+        this.logger.error(`Error saving cache to PostgreSQL: ${err.message}`);
+      }
+    }
+
+    // 2. Write to Redis with 30-day TTL (fast memory access)
+    if (this.redis) {
+      try {
+        await this.redis.set(redisKey, JSON.stringify(mediaData), 'EX', 30 * 24 * 60 * 60);
+        this.logger.log(`Saved cache to Redis for URL: ${instagramUrl}`);
+      } catch (err) {
+        this.logger.warn(`Failed to save cache to Redis: ${err.message}`);
+      }
     }
   }
 }
