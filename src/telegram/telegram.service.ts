@@ -53,8 +53,8 @@ export class TelegramService implements OnModuleInit, OnModuleDestroy {
   private bot: Telegraf;
   private webhookCallbackFn: any = null;
 
-  // 8 concurrent tasks: mostly I/O-bound (network), safe for Render 512MB free tier
-  private readonly executionQueue = new TaskQueue(8);
+  // 3 concurrent tasks: safely handles batch uploads without triggering JerryCoder rate limits
+  private readonly executionQueue = new TaskQueue(3);
 
   constructor(
     private readonly configService: ConfigService,
@@ -160,6 +160,9 @@ export class TelegramService implements OnModuleInit, OnModuleDestroy {
       if (this.instagramService.isValidUrl(text)) {
         // Wrap the execution inside our concurrency queue to protect resources
         this.executionQueue.run(async () => {
+          // Add a random delay (0.5s to 2.0s) to spread requests and avoid workers.dev rate limits
+          const randomDelay = Math.floor(Math.random() * 1500) + 500;
+          await new Promise(resolve => setTimeout(resolve, randomDelay));
           await this.handleInstagramDownload(ctx, text);
         }).catch(err => {
           this.logger.error(`Error handling download in queue: ${err.message}`);
