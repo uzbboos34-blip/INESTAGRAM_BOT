@@ -53,8 +53,8 @@ export class TelegramService implements OnModuleInit, OnModuleDestroy {
   private bot: Telegraf;
   private webhookCallbackFn: any = null;
 
-  // 3 concurrent tasks: safely handles batch uploads without triggering JerryCoder rate limits
-  private readonly executionQueue = new TaskQueue(3);
+  // 5 concurrent tasks: optimal balance between download speed and API stability
+  private readonly executionQueue = new TaskQueue(5);
 
   constructor(
     private readonly configService: ConfigService,
