@@ -461,7 +461,8 @@ export class InstagramService {
       'Connection': 'keep-alive',
     };
 
-    const bypassDirect = process.env.BYPASS_DIRECT_DOWNLOAD === 'true';
+    const isRender = !!process.env.RENDER;
+    const bypassDirect = isRender ? false : (process.env.BYPASS_DIRECT_DOWNLOAD === 'true');
 
     if (!bypassDirect) {
       try {
