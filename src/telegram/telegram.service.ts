@@ -204,12 +204,44 @@ export class TelegramService implements OnModuleInit, OnModuleDestroy {
     });
 
     // Handle text messages (Instagram URLs)
-    this.bot.on('text', (ctx) => {
+    this.bot.on('text', async (ctx) => {
       if (!ctx.chat) return;
       const text = ctx.message.text.trim();
 
       if (this.instagramService.isValidUrl(text)) {
-        // Wrap the execution inside our concurrency queue to protect resources
+        const normalizedUrl = this.instagramService.normalizeUrl(text);
+
+        try {
+          // CHECK CACHE FIRST (Bypasses queue and delays entirely for instant delivery!)
+          const cached = await this.databaseService.getCache(normalizedUrl);
+          if (cached && cached.length > 0) {
+            this.logger.log(`[Instant DB Cache Hit] Serving cached file_id for URL: ${normalizedUrl}`);
+            const shortcode = this.instagramService.extractShortcode(text);
+
+            const extra = Markup.inlineKeyboard([
+              [
+                Markup.button.callback('🗑️ O\'chirish', 'del'),
+                Markup.button.callback('📝 Tavsif', `desc:${shortcode}`),
+              ],
+              [
+                Markup.button.callback('🎵 MP3', `mp3:${shortcode}`),
+              ]
+            ]).reply_markup;
+
+            for (const item of cached) {
+              if (item.type === 'video') {
+                await ctx.replyWithVideo(item.fileId, { caption: '✅ Video tayyor!', reply_markup: extra });
+              } else {
+                await ctx.replyWithPhoto(item.fileId, { caption: '✅ Rasm tayyor!', reply_markup: extra });
+              }
+            }
+            return;
+          }
+        } catch (err: any) {
+          this.logger.warn(`Failed to execute fast cache check: ${err.message}`);
+        }
+
+        // Only if NOT cached, run inside the queue with stagger delay
         this.executionQueue.run(async () => {
           // Add a random delay (0.5s to 2.0s) to spread requests and avoid workers.dev rate limits
           const randomDelay = Math.floor(Math.random() * 1500) + 500;
