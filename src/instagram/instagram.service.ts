@@ -22,12 +22,15 @@ const DNS_TTL = 30 * 60 * 1000; // 30-minute DNS cache TTL
 function customDnsLookup(
   hostname: string,
   options: any,
-  callback: (err: NodeJS.ErrnoException | null, address: any, family: any) => void
+  callback?: (err: NodeJS.ErrnoException | null, address: any, family: any) => void
 ) {
+  const cb = typeof options === 'function' ? options : callback;
+  if (!cb) return;
+
   const now = Date.now();
   const cached = dnsCache.get(hostname);
   if (cached && cached.expires > now) {
-    return callback(null, cached.address, cached.family);
+    return cb(null, cached.address, cached.family);
   }
 
   // Force IPv4 only (family: 4) to bypass slow IPv6 resolution
@@ -35,16 +38,16 @@ function customDnsLookup(
     if (err || !addresses || addresses.length === 0) {
       // Fallback to standard resolver for local/localhost/internal addresses
       return (dns.lookup as any)(hostname, { family: 4 }, (lookupErr: any, address: any, family: any) => {
-        if (lookupErr) return callback(lookupErr, null, null);
+        if (lookupErr) return cb(lookupErr, null, null);
         dnsCache.set(hostname, { address, family, expires: Date.now() + 5000 }); // Cache resolution errors for 5s
-        callback(null, address, family);
+        cb(null, address, family);
       });
     }
 
     const address = addresses[0];
     const family = 4;
     dnsCache.set(hostname, { address, family, expires: now + DNS_TTL });
-    callback(null, address, family);
+    cb(null, address, family);
   });
 }
 
