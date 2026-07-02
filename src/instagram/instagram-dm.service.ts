@@ -57,8 +57,22 @@ export class InstagramDmService implements OnModuleInit, OnModuleDestroy {
     }
 
     if (botProxy) {
-      this.logger.log(`Using proxy for Instagram Bot client: ${botProxy.split('@')[1] || botProxy}`);
+      if (!botProxy.startsWith('http://') && !botProxy.startsWith('https://')) {
+        botProxy = `http://${botProxy}`;
+      }
+
+      const safeLogProxy = botProxy.includes('@') ? botProxy.split('@')[1] : botProxy;
+      this.logger.log(`Using proxy for Instagram Bot client: ${safeLogProxy}`);
       this.ig.state.proxyUrl = botProxy;
+
+      try {
+        const { HttpsProxyAgent } = require('https-proxy-agent');
+        const agent = new HttpsProxyAgent(botProxy);
+        this.ig.request.defaults = { agent };
+        this.logger.log('Successfully configured HttpsProxyAgent for authenticated proxy tunneling.');
+      } catch (agentErr: any) {
+        this.logger.error(`Failed to configure HttpsProxyAgent: ${agentErr.message}`);
+      }
     }
 
     try {
