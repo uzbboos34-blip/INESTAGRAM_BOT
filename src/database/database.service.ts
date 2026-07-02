@@ -132,35 +132,55 @@ export class DatabaseService implements OnModuleInit, OnModuleDestroy {
   }
 
   async createOrUpdateMapping(instagramUsername: string, telegramChatId: string, verificationCode: string): Promise<void> {
-    if (!this.db) return;
     const usernameClean = instagramUsername.toLowerCase().trim().replace(/^@/, '');
-    const query = `
-      INSERT INTO user_mappings (instagram_username, telegram_chat_id, verification_code, is_verified)
-      VALUES (?, ?, ?, 0)
-      ON CONFLICT(instagram_username) DO UPDATE SET
-        telegram_chat_id = excluded.telegram_chat_id,
-        verification_code = excluded.verification_code,
-        is_verified = 0;
-    `;
-    try {
-      await this.db.run(query, [usernameClean, telegramChatId, verificationCode]);
-      this.logger.log(`Created/updated mapping for user: ${usernameClean} -> ${telegramChatId} with code: ${verificationCode}`);
-    } catch (err) {
-      // Fallback for older sqlite versions without ON CONFLICT DO UPDATE
+    this.logger.log(`Created/updated mapping for user: ${usernameClean} -> ${telegramChatId} with code: ${verificationCode}`);
+
+    // Primary: Redis (persists across deploys)
+    if (this.redis) {
       try {
-        await this.db.run('DELETE FROM user_mappings WHERE instagram_username = ?', [usernameClean]);
-        await this.db.run('INSERT INTO user_mappings (instagram_username, telegram_chat_id, verification_code, is_verified) VALUES (?, ?, ?, 0)', [usernameClean, telegramChatId, verificationCode]);
-        this.logger.log(`[Fallback] Created mapping for user: ${usernameClean} -> ${telegramChatId}`);
-      } catch (fallbackErr) {
-        this.logger.error(`Failed to save user mapping: ${fallbackErr.message}`);
-        throw fallbackErr;
+        await this.redis.hset(`mapping:${usernameClean}`,
+          'telegram_chat_id', telegramChatId,
+          'verification_code', verificationCode,
+          'is_verified', '0',
+        );
+        await this.redis.set(`code:${verificationCode}`, usernameClean);
+        return;
+      } catch (err) {
+        this.logger.warn(`Redis createOrUpdateMapping failed: ${err.message}. Falling back to SQLite.`);
       }
+    }
+
+    // Fallback: SQLite
+    if (!this.db) return;
+    try {
+      await this.db.run('DELETE FROM user_mappings WHERE instagram_username = ?', [usernameClean]);
+      await this.db.run('INSERT INTO user_mappings (instagram_username, telegram_chat_id, verification_code, is_verified) VALUES (?, ?, ?, 0)', [usernameClean, telegramChatId, verificationCode]);
+    } catch (err) {
+      this.logger.error(`Failed to save user mapping: ${err.message}`);
     }
   }
 
   async getMappingByUsername(instagramUsername: string): Promise<{ telegram_chat_id: string; is_verified: number; verification_code: string } | null> {
-    if (!this.db) return null;
     const usernameClean = instagramUsername.toLowerCase().trim().replace(/^@/, '');
+
+    // Primary: Redis
+    if (this.redis) {
+      try {
+        const data = await this.redis.hgetall(`mapping:${usernameClean}`);
+        if (data && data.telegram_chat_id) {
+          return {
+            telegram_chat_id: data.telegram_chat_id,
+            is_verified: parseInt(data.is_verified || '0', 10),
+            verification_code: data.verification_code || '',
+          };
+        }
+      } catch (err) {
+        this.logger.warn(`Redis getMappingByUsername failed: ${err.message}`);
+      }
+    }
+
+    // Fallback: SQLite
+    if (!this.db) return null;
     try {
       const row = await this.db.get('SELECT telegram_chat_id, is_verified, verification_code FROM user_mappings WHERE instagram_username = ?', [usernameClean]);
       return row || null;
@@ -171,6 +191,22 @@ export class DatabaseService implements OnModuleInit, OnModuleDestroy {
   }
 
   async getMappingByCode(verificationCode: string): Promise<{ instagram_username: string; telegram_chat_id: string } | null> {
+    // Primary: Redis
+    if (this.redis) {
+      try {
+        const username = await this.redis.get(`code:${verificationCode}`);
+        if (username) {
+          const data = await this.redis.hgetall(`mapping:${username}`);
+          if (data && data.telegram_chat_id && data.is_verified === '0') {
+            return { instagram_username: username, telegram_chat_id: data.telegram_chat_id };
+          }
+        }
+      } catch (err) {
+        this.logger.warn(`Redis getMappingByCode failed: ${err.message}`);
+      }
+    }
+
+    // Fallback: SQLite
     if (!this.db) return null;
     try {
       const row = await this.db.get('SELECT instagram_username, telegram_chat_id FROM user_mappings WHERE verification_code = ? AND is_verified = 0', [verificationCode]);
@@ -182,28 +218,63 @@ export class DatabaseService implements OnModuleInit, OnModuleDestroy {
   }
 
   async verifyMapping(instagramUsername: string): Promise<void> {
-    if (!this.db) return;
     const usernameClean = instagramUsername.toLowerCase().trim().replace(/^@/, '');
+    this.logger.log(`Verified mapping for user: ${usernameClean}`);
+
+    // Primary: Redis
+    if (this.redis) {
+      try {
+        const code = await this.redis.hget(`mapping:${usernameClean}`, 'verification_code');
+        await this.redis.hset(`mapping:${usernameClean}`, 'is_verified', '1', 'verification_code', '');
+        if (code) await this.redis.del(`code:${code}`);
+        return;
+      } catch (err) {
+        this.logger.warn(`Redis verifyMapping failed: ${err.message}`);
+      }
+    }
+
+    // Fallback: SQLite
+    if (!this.db) return;
     try {
       await this.db.run('UPDATE user_mappings SET is_verified = 1, verification_code = NULL WHERE instagram_username = ?', [usernameClean]);
-      this.logger.log(`Verified mapping for user: ${usernameClean}`);
     } catch (err) {
       this.logger.error(`Failed to verify mapping: ${err.message}`);
     }
   }
 
   async isMessageProcessed(messageId: string): Promise<boolean> {
+    // Primary: Redis
+    if (this.redis) {
+      try {
+        const exists = await this.redis.exists(`msg:${messageId}`);
+        return exists === 1;
+      } catch (err) {
+        this.logger.warn(`Redis isMessageProcessed failed: ${err.message}`);
+      }
+    }
+
+    // Fallback: SQLite
     if (!this.db) return false;
     try {
       const row = await this.db.get('SELECT message_id FROM processed_messages WHERE message_id = ?', [messageId]);
       return !!row;
     } catch (err) {
-      this.logger.error(`Failed to check processed message: ${err.message}`);
       return false;
     }
   }
 
   async markMessageAsProcessed(messageId: string): Promise<void> {
+    // Primary: Redis (7-day TTL to prevent memory bloat)
+    if (this.redis) {
+      try {
+        await this.redis.set(`msg:${messageId}`, '1', 'EX', 7 * 24 * 60 * 60);
+        return;
+      } catch (err) {
+        this.logger.warn(`Redis markMessageAsProcessed failed: ${err.message}`);
+      }
+    }
+
+    // Fallback: SQLite
     if (!this.db) return;
     try {
       await this.db.run('INSERT OR IGNORE INTO processed_messages (message_id) VALUES (?)', [messageId]);
