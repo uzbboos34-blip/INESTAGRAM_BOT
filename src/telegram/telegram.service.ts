@@ -142,6 +142,53 @@ export class TelegramService implements OnModuleInit, OnModuleDestroy {
     this.bot.start((ctx) => this.sendWelcomeMessage(ctx));
     this.bot.help((ctx) => this.sendWelcomeMessage(ctx));
 
+    // Link Instagram Account Command
+    this.bot.command('link', async (ctx) => {
+      const text = ctx.message.text.trim();
+      const parts = text.split(/\s+/);
+      if (parts.length < 2) {
+        await ctx.reply(
+          "⚠️ *Instagram akkauntni bog'lash:*\n\n" +
+          "Iltimos, Instagram profilingiz nomini (username) yuboring.\n" +
+          "Masalan:\n`/link profilingiz_nomi`\n\n" +
+          "Yoki:\n`/link @profilingiz_nomi`",
+          { parse_mode: 'Markdown' }
+        );
+        return;
+      }
+
+      const instagramUsername = parts[1].replace(/^@/, '').toLowerCase().trim();
+      if (!instagramUsername || instagramUsername.length < 1) {
+        await ctx.reply("❌ Yaroqsiz Instagram foydalanuvchi nomi.");
+        return;
+      }
+
+      // Generate a random 4-digit code
+      const verificationCode = Math.floor(1000 + Math.random() * 9000).toString();
+
+      try {
+        await this.databaseService.createOrUpdateMapping(
+          instagramUsername,
+          ctx.chat.id.toString(),
+          verificationCode
+        );
+
+        const botUsername = this.configService.get<string>('INSTAGRAM_BOT_USERNAME') || 'Instagram_Bot';
+        const instructionText =
+          `🔗 *Instagram akkauntni bog'lash:*\n\n` +
+          `Sizning Instagram nikingiz: *@${instagramUsername}*\n` +
+          `Tasdiqlash kodi: \`${verificationCode}\`\n\n` +
+          `Akkauntingizni tasdiqlash uchun quyidagi amallarni bajaring:\n` +
+          `1️⃣ Instagram'da *@${botUsername}* akkaunti Direct (DM)iga kiring.\n` +
+          `2️⃣ Unga faqatgina mana shu \`${verificationCode}\` kodini yozib yuboring.\n\n` +
+          `Tizim kodni qabul qilgach, ushbu Telegram bot sizga tasdiqlash xabarini yuboradi.`;
+
+        await ctx.reply(instructionText, { parse_mode: 'Markdown' });
+      } catch (err: any) {
+        await ctx.reply(`❌ Akkauntni bog'lashda xatolik yuz berdi: ${err.message}`);
+      }
+    });
+
     // Clear Cache Command (For developer testing)
     this.bot.command('clear', async (ctx) => {
       try {
@@ -540,5 +587,43 @@ export class TelegramService implements OnModuleInit, OnModuleDestroy {
       }
       throw err;
     }
+  }
+
+  /**
+   * Helper to send direct text message to a user.
+   */
+  async sendDirectMessage(telegramChatId: string, text: string, options?: any): Promise<void> {
+    try {
+      await this.bot.telegram.sendMessage(telegramChatId, text, options);
+    } catch (err: any) {
+      this.logger.error(`Failed to send direct message to ${telegramChatId}: ${err.message}`);
+    }
+  }
+
+  /**
+   * Deliver shared Instagram Reel/Post to a user by mimicking Telegram message context.
+   */
+  async deliverSharedMedia(telegramChatId: string, shortcode: string, instagramUsername: string): Promise<void> {
+    const url = `https://www.instagram.com/reel/${shortcode}/`;
+    
+    // Create a mock context wrapper to reuse all logic, queueing, caching, stream fallback, limits, etc.
+    const mockCtx = {
+      chat: { id: parseInt(telegramChatId, 10) },
+      from: { first_name: instagramUsername },
+      telegram: this.bot.telegram,
+      reply: (text: string, extra?: any) => this.bot.telegram.sendMessage(telegramChatId, text, extra),
+      replyWithVideo: (video: any, extra?: any) => this.bot.telegram.sendVideo(telegramChatId, video, extra),
+      replyWithPhoto: (photo: any, extra?: any) => this.bot.telegram.sendPhoto(telegramChatId, photo, extra),
+      replyWithAudio: (audio: any, extra?: any) => this.bot.telegram.sendAudio(telegramChatId, audio, extra),
+    } as any;
+
+    // Run within the execution queue with delay to protect limits and avoid crashing Render
+    this.executionQueue.run(async () => {
+      const randomDelay = Math.floor(Math.random() * 1500) + 500;
+      await new Promise(resolve => setTimeout(resolve, randomDelay));
+      await this.handleInstagramDownload(mockCtx, url);
+    }).catch(err => {
+      this.logger.error(`Error handling shared media delivery in queue: ${err.message}`);
+    });
   }
 }

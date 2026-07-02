@@ -77,17 +77,17 @@ export class DatabaseService implements OnModuleInit, OnModuleDestroy {
 
   private async initSchema() {
     if (!this.db) return;
-    const query = `
-      CREATE TABLE IF NOT EXISTS instagram_cache (
-        instagram_url TEXT PRIMARY KEY,
-        media_data TEXT NOT NULL,
-        created_at DATETIME DEFAULT CURRENT_TIMESTAMP
-      );
-    `;
     try {
-      await this.db.run(query);
+      // 1. Instagram cache table
+      await this.db.run(`
+        CREATE TABLE IF NOT EXISTS instagram_cache (
+          instagram_url TEXT PRIMARY KEY,
+          media_data TEXT NOT NULL,
+          created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+        );
+      `);
       this.logger.log('SQLite cache table instagram_cache initialized/verified.');
-      
+
       // Dynamically add caption column if missing
       try {
         await this.db.run('ALTER TABLE instagram_cache ADD COLUMN caption TEXT;');
@@ -95,8 +95,149 @@ export class DatabaseService implements OnModuleInit, OnModuleDestroy {
       } catch (e) {
         // Column already exists, safe to ignore
       }
+
+      // 2. User mappings table
+      await this.db.run(`
+        CREATE TABLE IF NOT EXISTS user_mappings (
+          instagram_username TEXT PRIMARY KEY,
+          telegram_chat_id TEXT NOT NULL,
+          is_verified INTEGER DEFAULT 0,
+          verification_code TEXT,
+          created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+        );
+      `);
+      this.logger.log('SQLite table user_mappings initialized/verified.');
+
+      // 3. Processed messages table (to avoid duplicates)
+      await this.db.run(`
+        CREATE TABLE IF NOT EXISTS processed_messages (
+          message_id TEXT PRIMARY KEY,
+          created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+        );
+      `);
+      this.logger.log('SQLite table processed_messages initialized/verified.');
+
+      // 4. Instagram session table (for session caching)
+      await this.db.run(`
+        CREATE TABLE IF NOT EXISTS instagram_session (
+          id INTEGER PRIMARY KEY CHECK (id = 1),
+          session_data TEXT NOT NULL,
+          updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+        );
+      `);
+      this.logger.log('SQLite table instagram_session initialized/verified.');
     } catch (err) {
       this.logger.error(`Failed to initialize SQLite schema: ${err.message}`);
+    }
+  }
+
+  async createOrUpdateMapping(instagramUsername: string, telegramChatId: string, verificationCode: string): Promise<void> {
+    if (!this.db) return;
+    const usernameClean = instagramUsername.toLowerCase().trim().replace(/^@/, '');
+    const query = `
+      INSERT INTO user_mappings (instagram_username, telegram_chat_id, verification_code, is_verified)
+      VALUES (?, ?, ?, 0)
+      ON CONFLICT(instagram_username) DO UPDATE SET
+        telegram_chat_id = excluded.telegram_chat_id,
+        verification_code = excluded.verification_code,
+        is_verified = 0;
+    `;
+    try {
+      await this.db.run(query, [usernameClean, telegramChatId, verificationCode]);
+      this.logger.log(`Created/updated mapping for user: ${usernameClean} -> ${telegramChatId} with code: ${verificationCode}`);
+    } catch (err) {
+      // Fallback for older sqlite versions without ON CONFLICT DO UPDATE
+      try {
+        await this.db.run('DELETE FROM user_mappings WHERE instagram_username = ?', [usernameClean]);
+        await this.db.run('INSERT INTO user_mappings (instagram_username, telegram_chat_id, verification_code, is_verified) VALUES (?, ?, ?, 0)', [usernameClean, telegramChatId, verificationCode]);
+        this.logger.log(`[Fallback] Created mapping for user: ${usernameClean} -> ${telegramChatId}`);
+      } catch (fallbackErr) {
+        this.logger.error(`Failed to save user mapping: ${fallbackErr.message}`);
+        throw fallbackErr;
+      }
+    }
+  }
+
+  async getMappingByUsername(instagramUsername: string): Promise<{ telegram_chat_id: string; is_verified: number; verification_code: string } | null> {
+    if (!this.db) return null;
+    const usernameClean = instagramUsername.toLowerCase().trim().replace(/^@/, '');
+    try {
+      const row = await this.db.get('SELECT telegram_chat_id, is_verified, verification_code FROM user_mappings WHERE instagram_username = ?', [usernameClean]);
+      return row || null;
+    } catch (err) {
+      this.logger.error(`Failed to get mapping by username: ${err.message}`);
+      return null;
+    }
+  }
+
+  async getMappingByCode(verificationCode: string): Promise<{ instagram_username: string; telegram_chat_id: string } | null> {
+    if (!this.db) return null;
+    try {
+      const row = await this.db.get('SELECT instagram_username, telegram_chat_id FROM user_mappings WHERE verification_code = ? AND is_verified = 0', [verificationCode]);
+      return row || null;
+    } catch (err) {
+      this.logger.error(`Failed to get mapping by code: ${err.message}`);
+      return null;
+    }
+  }
+
+  async verifyMapping(instagramUsername: string): Promise<void> {
+    if (!this.db) return;
+    const usernameClean = instagramUsername.toLowerCase().trim().replace(/^@/, '');
+    try {
+      await this.db.run('UPDATE user_mappings SET is_verified = 1, verification_code = NULL WHERE instagram_username = ?', [usernameClean]);
+      this.logger.log(`Verified mapping for user: ${usernameClean}`);
+    } catch (err) {
+      this.logger.error(`Failed to verify mapping: ${err.message}`);
+    }
+  }
+
+  async isMessageProcessed(messageId: string): Promise<boolean> {
+    if (!this.db) return false;
+    try {
+      const row = await this.db.get('SELECT message_id FROM processed_messages WHERE message_id = ?', [messageId]);
+      return !!row;
+    } catch (err) {
+      this.logger.error(`Failed to check processed message: ${err.message}`);
+      return false;
+    }
+  }
+
+  async markMessageAsProcessed(messageId: string): Promise<void> {
+    if (!this.db) return;
+    try {
+      await this.db.run('INSERT OR IGNORE INTO processed_messages (message_id) VALUES (?)', [messageId]);
+    } catch (err) {
+      this.logger.error(`Failed to mark message as processed: ${err.message}`);
+    }
+  }
+
+  async saveSession(sessionData: string): Promise<void> {
+    if (!this.db) return;
+    try {
+      await this.db.run(`
+        INSERT INTO instagram_session (id, session_data, updated_at)
+        VALUES (1, ?, CURRENT_TIMESTAMP)
+        ON CONFLICT(id) DO UPDATE SET session_data = excluded.session_data, updated_at = CURRENT_TIMESTAMP
+      `, [sessionData]);
+    } catch (err) {
+      try {
+        await this.db.run('DELETE FROM instagram_session WHERE id = 1');
+        await this.db.run('INSERT INTO instagram_session (id, session_data) VALUES (1, ?)', [sessionData]);
+      } catch (fallbackErr) {
+        this.logger.error(`Failed to save session: ${fallbackErr.message}`);
+      }
+    }
+  }
+
+  async getSession(): Promise<string | null> {
+    if (!this.db) return null;
+    try {
+      const row = await this.db.get('SELECT session_data FROM instagram_session WHERE id = 1');
+      return row ? row.session_data : null;
+    } catch (err) {
+      this.logger.error(`Failed to get session: ${err.message}`);
+      return null;
     }
   }
 
