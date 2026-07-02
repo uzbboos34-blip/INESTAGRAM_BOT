@@ -349,7 +349,10 @@ export class TelegramService implements OnModuleInit, OnModuleDestroy {
               verificationCode
             );
 
-            // Send DM to Instagram user via the bot account
+            // 1. Send follow request to the user (crucial for private accounts so they see notifications & DMs)
+            await this.instagramDmService.followUser(targetUserId);
+
+            // 2. Send DM to Instagram user via the bot account
             const botUsername = this.configService.get<string>('INSTAGRAM_BOT_USERNAME') || 'Instagram_Bot';
             const dmSent = await this.instagramDmService.sendDmToNewUser(
               targetUserId,
@@ -364,9 +367,10 @@ export class TelegramService implements OnModuleInit, OnModuleDestroy {
                 chatId,
                 statusMsg.message_id,
                 undefined,
-                `🚀 *Tasdiqlash kodi Instagram Direct'ingizga yuborildi!*\n\n` +
-                `Instagram'da *@${usernameClean}* profilingiz Direct (DM) qutisiga kiring.\n` +
-                `Botimiz yuborgan \`${verificationCode}\` kodini o'sha yerda (Instagram Direct'da) qaytadan yozib yuboring.`,
+                `🚀 *Tasdiqlash kodi Instagram'ga yuborildi!*\n\n` +
+                `1️⃣ Biz sizning Instagram profilingizga **obuna bo'lish so'rovi (follow request)** yubordik. Iltimos, uni qabul qiling (agar profilingiz yopiq bo'lsa).\n` +
+                `2️⃣ Instagram Direct (DM) qutingizga kiring. Botimiz yuborgan \`${verificationCode}\` kodini o'sha yerda (Instagram Direct'da) javob qilib yozib yuboring.\n\n` +
+                `*Eslatma:* Agar xabar kelmagan bo'lsa, Direct'dagi **"Message Requests" (Zaproslar / Xabarlar so'rovlari)** bo'limini tekshiring.`,
                 { parse_mode: 'Markdown' }
               );
             } else {
@@ -374,11 +378,12 @@ export class TelegramService implements OnModuleInit, OnModuleDestroy {
                 chatId,
                 statusMsg.message_id,
                 undefined,
-                `⚠️ *Direct xabar yuborib bo'lmadi:*\n\n` +
-                `Instagram *@${usernameClean}* profilingizga avtomatik Direct xabar yuborish imkoni bo'lmadi. (Ehtimol, sizda Direct yopiq yoki bot akkaunti cheklangan).\n\n` +
-                `*Muammo yo'q!* Akkauntni qo'lda bog'lashingiz mumkin:\n` +
-                `1️⃣ Instagram'da *@${botUsername}* akkauntiga Direct'dan kirib istalgan biror narsa (masalan: "salom") deb yozing.\n` +
-                `2️⃣ Keyin ushbu Telegram botga qaytib, qaytadan profilingiz nomini yuboring.`,
+                `⚠️ *Obuna bo'lish so'rovi yuborildi, lekin to'g'ridan-to'g'ri DM yetkazilmadi.*\n\n` +
+                `Instagram profilingiz shaxsiy (zakrit) bo'lgani uchun xabar bloklangan bo'lishi mumkin.\n\n` +
+                `*Buni to'g'irlash juda oson:*\n` +
+                `1️⃣ Avval Instagram'da yangi bot profilingizga kirib so'rovimizni qabul qiling.\n` +
+                `2️⃣ Direct'da botimizga o'zingiz birinchi bo'lib istalgan xabarni yozing.\n` +
+                `3️⃣ So'ng, Telegram botga qaytib, profilingiz nomini boshqatdan yuboring. Tasdiqlash kodi Direct'ga darhol boradi!`,
                 { parse_mode: 'Markdown' }
               );
             }
