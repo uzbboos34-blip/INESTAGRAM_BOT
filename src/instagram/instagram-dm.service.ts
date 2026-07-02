@@ -4,6 +4,7 @@ import { DatabaseService } from '../database/database.service';
 import { TelegramService } from '../telegram/telegram.service';
 import axios, { AxiosInstance } from 'axios';
 import { randomUUID } from 'crypto';
+import { HttpsProxyAgent } from 'https-proxy-agent';
 
 @Injectable()
 export class InstagramDmService implements OnModuleInit, OnModuleDestroy {
@@ -41,16 +42,43 @@ export class InstagramDmService implements OnModuleInit, OnModuleDestroy {
 
     this.logger.log(`Loaded bot cookie for user ID: ${this.dsUserId}`);
 
+    // Parse and choose a proxy from PROXY_POOL or config
+    let agent: HttpsProxyAgent | undefined;
+    const botProxy = this.configService.get<string>('INSTAGRAM_BOT_PROXY');
+    const proxyPool = this.configService.get<string>('PROXY_POOL');
+
+    let chosenProxy = '';
+    if (botProxy && botProxy !== 'none') {
+      chosenProxy = botProxy;
+    } else if (proxyPool) {
+      const pool = proxyPool.split(',').map(p => p.trim()).filter(Boolean);
+      if (pool.length > 0) {
+        // Choose a random proxy from the pool to spread traffic
+        chosenProxy = pool[Math.floor(Math.random() * pool.length)];
+      }
+    }
+
+    if (chosenProxy) {
+      // Ensure the protocol prefix is present
+      const proxyFormatted = chosenProxy.startsWith('http') ? chosenProxy : `http://${chosenProxy}`;
+      agent = new HttpsProxyAgent(proxyFormatted);
+      this.logger.log(`Instagram DM service configured to route traffic via proxy: ${proxyFormatted.split('@')[1] || proxyFormatted}`);
+    } else {
+      this.logger.warn('No proxy configured for Instagram DM service. Datacenter IP might be blocked.');
+    }
+
     // Build axios client targeting www.instagram.com web API
     // Browser sessions (web cookies) work with www.instagram.com but NOT with i.instagram.com
     this.httpClient = axios.create({
       baseURL: 'https://www.instagram.com',
+      httpsAgent: agent,
       headers: {
         'Cookie': this.cookieString,
         'X-CSRFToken': this.csrfToken,
         'X-IG-App-ID': '936619743392459',
+        'X-ASBD-ID': '129477',
         'X-Requested-With': 'XMLHttpRequest',
-        'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36',
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36',
         'Referer': 'https://www.instagram.com/direct/inbox/',
         'Accept': '*/*',
         'Accept-Language': 'en-US,en;q=0.9',
