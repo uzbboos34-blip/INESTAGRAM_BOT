@@ -44,8 +44,11 @@ export class InstagramDmService implements OnModuleInit, OnModuleDestroy {
 
     // Parse and choose a proxy from PROXY_POOL or config
     let agent: HttpsProxyAgent | undefined;
-    const botProxy = this.configService.get<string>('INSTAGRAM_BOT_PROXY');
+    const botProxyRaw = this.configService.get<string>('INSTAGRAM_BOT_PROXY');
     const proxyPool = this.configService.get<string>('PROXY_POOL');
+
+    // Strip quotes and trim
+    const botProxy = botProxyRaw ? botProxyRaw.replace(/['"]/g, '').trim() : '';
 
     let chosenProxy = '';
     if (botProxy && botProxy !== 'none') {
