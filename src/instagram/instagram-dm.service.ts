@@ -123,13 +123,26 @@ export class InstagramDmService implements OnModuleInit, OnModuleDestroy {
       this.logger.warn(`Instagram DM Client initialization encountered an error:`);
       this.logger.warn(`- Error class: ${constructorName}`);
       this.logger.warn(`- Error message: ${errorMessage}`);
+      if (err.response && err.response.body) {
+        this.logger.warn(`- Error response body: ${JSON.stringify(err.response.body)}`);
+      }
       this.logger.warn(`- Detected as checkpoint: ${isCheckpoint}`);
 
       if (isCheckpoint) {
         this.logger.warn('Instagram login requires verification (Checkpoint). Requesting verification code...');
         try {
-          // If we have challenge, we auto trigger code delivery
-          await this.ig.challenge.auto(true);
+          // Manually extract and assign checkpoint details from error response body
+          if (err.response && err.response.body) {
+            if (err.response.body.challenge) {
+              this.ig.state.checkpoint = err.response.body.challenge;
+            } else {
+              this.ig.state.checkpoint = err.response.body;
+            }
+          }
+
+          // Trigger code delivery automatically
+          const challengeInfo = await this.ig.challenge.auto(true);
+          this.logger.log(`Challenge auto result: ${JSON.stringify(challengeInfo)}`);
           this.logger.log('Verification code has been requested and sent! Please check your Email or SMS.');
           this.logger.log('Use command: /confirm <verification_code> in the Telegram bot to finalize the connection.');
         } catch (challengeErr: any) {
