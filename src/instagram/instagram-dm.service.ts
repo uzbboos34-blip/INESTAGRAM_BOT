@@ -171,12 +171,24 @@ export class InstagramDmService implements OnModuleInit, OnModuleDestroy {
     else if (item.item_type === 'clip' || item.item_type === 'media_share') {
       const mapping = await this.databaseService.getMappingByUsername(username);
       if (mapping && mapping.is_verified === 1) {
-        let shortcode = '';
-        if (item.item_type === 'clip' && item.clip?.code) {
-          shortcode = item.clip.code;
-        } else if (item.item_type === 'media_share' && item.media_share?.code) {
-          shortcode = item.media_share.code;
-        }
+        // Log full item to understand web API structure
+        this.logger.log(`Clip/media item keys: ${JSON.stringify(Object.keys(item))}`);
+        if (item.clip) this.logger.log(`clip keys: ${JSON.stringify(Object.keys(item.clip))}`);
+        if (item.media_share) this.logger.log(`media_share keys: ${JSON.stringify(Object.keys(item.media_share))}`);
+
+        // Try all possible shortcode/code paths (mobile API vs web API differ)
+        let shortcode =
+          item.clip?.code ||
+          item.clip?.shortcode ||
+          item.clip?.media?.code ||
+          item.clip?.media?.shortcode ||
+          item.clip?.clip?.code ||
+          item.clip?.clip?.shortcode ||
+          item.media_share?.code ||
+          item.media_share?.shortcode ||
+          item.media_share?.media?.code ||
+          item.media_share?.media?.shortcode ||
+          '';
 
         if (shortcode) {
           this.logger.log(`Shared Reel/Post detected from verified user @${username}: shortcode ${shortcode}`);
@@ -186,6 +198,8 @@ export class InstagramDmService implements OnModuleInit, OnModuleDestroy {
           );
 
           await this.telegramService.deliverSharedMedia(mapping.telegram_chat_id, shortcode, username);
+        } else {
+          this.logger.warn(`Could not extract shortcode. Full item: ${JSON.stringify(item).substring(0, 500)}`);
         }
       } else {
         await this.sendInstagramMessage(threadId,
