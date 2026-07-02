@@ -35,6 +35,9 @@ export class InstagramDmService implements OnModuleInit, OnModuleDestroy {
     constants.APP_VERSION_CODE = '372011650';
 
     this.ig.state.generateDevice(username);
+    // Override to a modern Android 12 device and build matching Instagram v320
+    this.ig.state.deviceString = '31/12; 480dpi; 1080x2340; samsung; SM-S901B; galaxy-s22; samsungexynos2200';
+    this.ig.state.build = '320.0.0.42.101';
 
     // Attach Bot Specific Proxy if defined in .env, fallback to first proxy from PROXY_POOL
     let botProxy = this.configService.get<string>('INSTAGRAM_BOT_PROXY');
