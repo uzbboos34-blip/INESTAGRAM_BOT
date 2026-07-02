@@ -217,18 +217,24 @@ export class InstagramDmService implements OnModuleInit, OnModuleDestroy {
   private async loadCookieString(cookieString: string) {
     const { Cookie } = require('tough-cookie');
     const cookies = cookieString.split(';').map(c => c.trim()).filter(Boolean);
+    // The mobile API sends requests to i.instagram.com, so we must set cookies
+    // for both domains — otherwise the cookie jar is empty when API calls are made.
+    const cookieUrls = ['https://i.instagram.com', 'https://instagram.com'];
     for (const c of cookies) {
-      const cookie = Cookie.parse(c);
-      if (cookie) {
-        cookie.domain = 'instagram.com';
-        await this.ig.state.cookieJar.setCookie(cookie, 'https://instagram.com');
-        if (cookie.key === 'ig_did') {
-          const igDidValue = cookie.value;
-          this.ig.state.uuid = igDidValue;
-          this.ig.state.phoneId = igDidValue;
-          this.ig.state.deviceId = `android-${igDidValue}`;
-          this.ig.state.adid = igDidValue;
-          this.logger.log(`Aligned device identifiers with cookie ig_did: ${igDidValue}`);
+      for (const url of cookieUrls) {
+        const cookie = Cookie.parse(c);
+        if (cookie) {
+          cookie.domain = '.instagram.com';
+          cookie.hostOnly = false;
+          await this.ig.state.cookieJar.setCookie(cookie.toString(), url);
+          if (cookie.key === 'ig_did') {
+            const igDidValue = cookie.value;
+            this.ig.state.uuid = igDidValue;
+            this.ig.state.phoneId = igDidValue;
+            this.ig.state.deviceId = `android-${igDidValue}`;
+            this.ig.state.adid = igDidValue;
+            this.logger.log(`Aligned device identifiers with cookie ig_did: ${igDidValue}`);
+          }
         }
       }
     }
