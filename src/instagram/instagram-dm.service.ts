@@ -201,7 +201,13 @@ export class InstagramDmService implements OnModuleInit, OnModuleDestroy {
 
   private async sendInstagramMessage(threadId: string, text: string): Promise<void> {
     try {
-      const params = new URLSearchParams({ text });
+      const { v4: uuidv4 } = require('uuid');
+      const clientContext = uuidv4().replace(/-/g, '');
+      const params = new URLSearchParams({
+        text,
+        client_context: clientContext,
+        mutation_token: clientContext,
+      });
       await this.httpClient.post(
         `/api/v1/direct_v2/threads/${threadId}/broadcast/text/`,
         params.toString(),
@@ -209,8 +215,9 @@ export class InstagramDmService implements OnModuleInit, OnModuleDestroy {
           headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
         }
       );
+      this.logger.log(`Sent Instagram DM reply to thread ${threadId}`);
     } catch (err: any) {
-      this.logger.warn(`Failed to send Instagram DM reply: ${err.message}`);
+      this.logger.warn(`Failed to send Instagram DM reply (thread: ${threadId}): ${err.response?.status} ${err.message}`);
     }
   }
 }
