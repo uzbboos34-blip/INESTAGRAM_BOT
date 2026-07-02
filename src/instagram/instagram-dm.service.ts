@@ -76,64 +76,40 @@ export class InstagramDmService implements OnModuleInit, OnModuleDestroy {
     }
 
     try {
-      // 1. Try to load INSTAGRAM_BOT_COOKIE if provided (bypasses login and works 100%!)
-      const botCookie = this.configService.get<string>('INSTAGRAM_BOT_COOKIE');
-      if (botCookie) {
-        this.logger.log('Loading Instagram Bot Cookie from configuration...');
-        await this.loadCookieString(botCookie);
+      // 1. Try to load saved session from database to avoid fresh logins and blocks
+      const savedSession = await this.databaseService.getSession();
+      if (savedSession) {
+        this.logger.log('Restoring Instagram session from database SQLite...');
         try {
-          // Bypassing active endpoint validation during startup to prevent block list checks.
-          // The cookie will be verified naturally when the polling worker requests directInbox.
-          this.logger.log(`Successfully loaded cookie string into client session.`);
+          await this.ig.state.deserialize(JSON.parse(savedSession));
+          // Quick health check - try accessing the inbox
+          await this.ig.feed.directInbox().items();
+          this.logger.log(`Successfully recovered session from database.`);
           this.isLoggedIn = true;
-
-          // Save the serialized session so next restarts read from DB
-          const serialized = await this.ig.state.serialize();
-          await this.databaseService.saveSession(JSON.stringify(serialized));
-        } catch (cookieErr: any) {
-          this.logger.warn(`Configured INSTAGRAM_BOT_COOKIE loading failed: ${cookieErr.message}. Trying DB or Login...`);
+        } catch (sessionErr: any) {
+          this.logger.warn(`Saved session invalid or expired: ${sessionErr.message}. Falling back to fresh login.`);
         }
       }
 
-      // 2. Try to load saved session from database to avoid fresh logins and blocks
+      // 2. Perform fresh mobile login with username + password
       if (!this.isLoggedIn) {
-        const savedSession = await this.databaseService.getSession();
-        if (savedSession) {
-          this.logger.log('Restoring Instagram session from database SQLite...');
-          try {
-            // Parse stringified session state and deserialize
-            await this.ig.state.deserialize(JSON.parse(savedSession));
-            const currentUser = await this.ig.account.currentUser();
-            this.logger.log(`Successfully recovered session. Logged in as: @${currentUser.username}`);
-            this.isLoggedIn = true;
-          } catch (sessionErr: any) {
-            this.logger.warn(`Saved session could not be recovered: ${sessionErr.message}. Falling back to fresh login.`);
-          }
-        }
-      }
-
-      // 3. Perform fresh login if session couldn't be recovered
-      if (!this.isLoggedIn) {
-        this.logger.log(`Attempting fresh Instagram login for @${username}...`);
+        this.logger.log(`Attempting fresh Instagram mobile login for @${username}...`);
         await this.ig.simulate.preLoginFlow();
         const loggedInUser = await this.ig.account.login(username, password);
         this.logger.log(`Fresh login successful! Logged in as: @${loggedInUser.username}`);
         this.isLoggedIn = true;
 
-        // Post login simulation
         process.nextTick(async () => {
-          try {
-            await this.ig.simulate.postLoginFlow();
-          } catch (e) {}
+          try { await this.ig.simulate.postLoginFlow(); } catch (e) {}
         });
 
         // Save serialized session state back to database
         const serialized = await this.ig.state.serialize();
         await this.databaseService.saveSession(JSON.stringify(serialized));
-        this.logger.log('Successfully saved session state to database SQLite.');
+        this.logger.log('Successfully saved mobile session to database SQLite.');
       }
 
-      // 4. Start Polling DMs
+      // 3. Start Polling DMs
       this.startPolling();
 
     } catch (err: any) {
