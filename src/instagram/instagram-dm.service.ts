@@ -31,8 +31,8 @@ export class InstagramDmService implements OnModuleInit, OnModuleDestroy {
 
     // Override outdated constants to bypass "unsupported_version" blocks
     const constants = this.ig.state.constants as any;
-    constants.APP_VERSION = '269.0.0.18.230';
-    constants.APP_VERSION_CODE = '441094056';
+    constants.APP_VERSION = '320.0.0.42.101';
+    constants.APP_VERSION_CODE = '372011650';
 
     this.ig.state.generateDevice(username);
 
@@ -141,12 +141,12 @@ export class InstagramDmService implements OnModuleInit, OnModuleDestroy {
           // Manually extract and assign checkpoint details from error response body
           if (err.response && err.response.body) {
             if (err.response.body.challenge) {
-              this.ig.state.checkpoint = err.response.body.challenge;
+              this.ig.state.checkpoint = err.response.body;
               if (err.response.body.challenge.api_path) {
                 hasApiPath = true;
               }
             } else {
-              this.ig.state.checkpoint = err.response.body;
+              this.ig.state.checkpoint = { challenge: err.response.body } as any;
               if (err.response.body.api_path) {
                 hasApiPath = true;
               }
