@@ -3,6 +3,7 @@ import { ConfigService } from '@nestjs/config';
 import { DatabaseService } from '../database/database.service';
 import { TelegramService } from '../telegram/telegram.service';
 import axios, { AxiosInstance } from 'axios';
+import { randomUUID } from 'crypto';
 
 @Injectable()
 export class InstagramDmService implements OnModuleInit, OnModuleDestroy {
@@ -102,8 +103,7 @@ export class InstagramDmService implements OnModuleInit, OnModuleDestroy {
   // Send a DM to any Instagram user by their numeric user ID (creates new thread)
   async sendDmToNewUser(instagramUserId: string, text: string): Promise<boolean> {
     try {
-      const { v4: uuidv4 } = require('uuid');
-      const clientContext = uuidv4().replace(/-/g, '');
+      const clientContext = randomUUID().replace(/-/g, '');
       const params = new URLSearchParams({
         recipient_users: `[[${instagramUserId}]]`,
         text,
@@ -253,8 +253,7 @@ export class InstagramDmService implements OnModuleInit, OnModuleDestroy {
 
   private async sendInstagramMessage(threadId: string, text: string): Promise<void> {
     try {
-      const { v4: uuidv4 } = require('uuid');
-      const clientContext = uuidv4().replace(/-/g, '');
+      const clientContext = randomUUID().replace(/-/g, '');
       const params = new URLSearchParams({
         text,
         client_context: clientContext,
