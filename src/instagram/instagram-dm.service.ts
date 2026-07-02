@@ -28,6 +28,12 @@ export class InstagramDmService implements OnModuleInit, OnModuleDestroy {
     }
 
     this.ig = new IgApiClient();
+
+    // Override outdated constants to bypass "unsupported_version" blocks
+    const constants = this.ig.state.constants as any;
+    constants.APP_VERSION = '269.0.0.18.230';
+    constants.APP_VERSION_CODE = '441094056';
+
     this.ig.state.generateDevice(username);
 
     // Attach Bot Specific Proxy if defined in .env, fallback to first proxy from PROXY_POOL
@@ -131,20 +137,35 @@ export class InstagramDmService implements OnModuleInit, OnModuleDestroy {
       if (isCheckpoint) {
         this.logger.warn('Instagram login requires verification (Checkpoint). Requesting verification code...');
         try {
+          let hasApiPath = false;
           // Manually extract and assign checkpoint details from error response body
           if (err.response && err.response.body) {
             if (err.response.body.challenge) {
               this.ig.state.checkpoint = err.response.body.challenge;
+              if (err.response.body.challenge.api_path) {
+                hasApiPath = true;
+              }
             } else {
               this.ig.state.checkpoint = err.response.body;
+              if (err.response.body.api_path) {
+                hasApiPath = true;
+              }
             }
           }
 
-          // Trigger code delivery automatically
-          const challengeInfo = await this.ig.challenge.auto(true);
-          this.logger.log(`Challenge auto result: ${JSON.stringify(challengeInfo)}`);
-          this.logger.log('Verification code has been requested and sent! Please check your Email or SMS.');
-          this.logger.log('Use command: /confirm <verification_code> in the Telegram bot to finalize the connection.');
+          if (hasApiPath) {
+            // Trigger code delivery automatically
+            const challengeInfo = await this.ig.challenge.auto(true);
+            this.logger.log(`Challenge auto result: ${JSON.stringify(challengeInfo)}`);
+            this.logger.log('Verification code has been requested and sent! Please check your Email or SMS.');
+            this.logger.log('Use command: /confirm <verification_code> in the Telegram bot to finalize the connection.');
+          } else {
+            const checkpointUrl = err.response?.body?.checkpoint_url || '';
+            this.logger.error(`Checkpoint requires manual verification. No API path was provided by Instagram.`);
+            if (checkpointUrl) {
+              this.logger.error(`Please open this URL in your browser to verify the login attempt: ${checkpointUrl}`);
+            }
+          }
         } catch (challengeErr: any) {
           this.logger.error(`Failed to request challenge code: ${challengeErr.message}`);
         }
