@@ -32,7 +32,10 @@ export class InstagramDmService implements OnModuleInit, OnModuleDestroy {
 
     // Attach Bot Specific Proxy if defined in .env, fallback to first proxy from PROXY_POOL
     let botProxy = this.configService.get<string>('INSTAGRAM_BOT_PROXY');
-    if (!botProxy) {
+    if (botProxy === 'none') {
+      this.logger.log('INSTAGRAM_BOT_PROXY is set to "none". Connecting directly without proxy.');
+      botProxy = undefined;
+    } else if (!botProxy) {
       const envPool = this.configService.get<string>('PROXY_POOL');
       if (envPool) {
         const proxies = envPool.split(',').map(item => item.trim()).filter(Boolean);
