@@ -113,9 +113,22 @@ export class InstagramDmService implements OnModuleInit, OnModuleDestroy {
       this.startPolling();
 
     } catch (err: any) {
-      if (err instanceof IgCheckpointError) {
+      const constructorName = err?.constructor?.name || 'UnknownError';
+      const errorMessage = err?.message || '';
+      const isCheckpoint = 
+        err instanceof IgCheckpointError || 
+        constructorName === 'IgCheckpointError' || 
+        errorMessage.includes('checkpoint_required');
+
+      this.logger.warn(`Instagram DM Client initialization encountered an error:`);
+      this.logger.warn(`- Error class: ${constructorName}`);
+      this.logger.warn(`- Error message: ${errorMessage}`);
+      this.logger.warn(`- Detected as checkpoint: ${isCheckpoint}`);
+
+      if (isCheckpoint) {
         this.logger.warn('Instagram login requires verification (Checkpoint). Requesting verification code...');
         try {
+          // If we have challenge, we auto trigger code delivery
           await this.ig.challenge.auto(true);
           this.logger.log('Verification code has been requested and sent! Please check your Email or SMS.');
           this.logger.log('Use command: /confirm <verification_code> in the Telegram bot to finalize the connection.');
@@ -123,7 +136,7 @@ export class InstagramDmService implements OnModuleInit, OnModuleDestroy {
           this.logger.error(`Failed to request challenge code: ${challengeErr.message}`);
         }
       } else {
-        this.logger.error(`Failed to initialize Instagram DM Client: ${err.message}`);
+        this.logger.error(`Failed to initialize Instagram DM Client: ${err.stack || err.message}`);
       }
     }
   }
