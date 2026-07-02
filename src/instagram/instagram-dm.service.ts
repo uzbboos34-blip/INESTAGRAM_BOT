@@ -156,6 +156,23 @@ export class InstagramDmService implements OnModuleInit, OnModuleDestroy {
     }
   }
 
+  // Send follow request to user by ID (helps with private accounts)
+  async followUser(instagramUserId: string): Promise<boolean> {
+    try {
+      const params = new URLSearchParams();
+      await this.httpClient.post(
+        `/api/v1/friendships/create/${instagramUserId}/`,
+        params.toString(),
+        { headers: { 'Content-Type': 'application/x-www-form-urlencoded' } }
+      );
+      this.logger.log(`Sent follow request to user ID ${instagramUserId}`);
+      return true;
+    } catch (err: any) {
+      this.logger.warn(`Failed to follow user ${instagramUserId}: ${err.message}`);
+      return false;
+    }
+  }
+
   private startPolling() {
     const intervalMs = 30000; // Set to 30 seconds as requested
     this.pollInterval = setInterval(async () => {
