@@ -126,7 +126,7 @@ export class InstagramDmService implements OnModuleInit, OnModuleDestroy {
   }
 
   private startPolling() {
-    const intervalMs = 60000; // Increased to 60 seconds to avoid Instagram bot detection
+    const intervalMs = 30000; // Set to 30 seconds as requested
     this.pollInterval = setInterval(async () => {
       try {
         await this.pollDirectInbox();
