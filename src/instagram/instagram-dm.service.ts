@@ -30,10 +30,22 @@ export class InstagramDmService implements OnModuleInit, OnModuleDestroy {
     this.ig = new IgApiClient();
     this.ig.state.generateDevice(username);
 
-    // Attach Bot Specific Proxy if defined in .env
-    const botProxy = this.configService.get<string>('INSTAGRAM_BOT_PROXY');
+    // Attach Bot Specific Proxy if defined in .env, fallback to first proxy from PROXY_POOL
+    let botProxy = this.configService.get<string>('INSTAGRAM_BOT_PROXY');
+    if (!botProxy) {
+      const envPool = this.configService.get<string>('PROXY_POOL');
+      if (envPool) {
+        const proxies = envPool.split(',').map(item => item.trim()).filter(Boolean);
+        if (proxies.length > 0) {
+          const firstProxy = proxies[0];
+          botProxy = firstProxy.startsWith('http') ? firstProxy : `http://${firstProxy}`;
+          this.logger.log(`INSTAGRAM_BOT_PROXY not set. Falling back to first proxy from PROXY_POOL: ${botProxy.split('@')[1] || botProxy}`);
+        }
+      }
+    }
+
     if (botProxy) {
-      this.logger.log(`Using dedicated proxy for Instagram Bot client: ${botProxy}`);
+      this.logger.log(`Using proxy for Instagram Bot client: ${botProxy.split('@')[1] || botProxy}`);
       this.ig.state.proxyUrl = botProxy;
     }
 
