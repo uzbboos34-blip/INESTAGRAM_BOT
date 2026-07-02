@@ -89,13 +89,15 @@ export class InstagramDmService implements OnModuleInit, OnModuleDestroy {
   // Get Instagram user's numeric ID from their username
   async getUserIdByUsername(username: string): Promise<string | null> {
     try {
-      const resp = await this.httpClient.get('/api/v1/users/web_profile_info/', {
-        params: { username },
+      const resp = await this.httpClient.get('/web/search/topsearch/', {
+        params: { context: 'blended', query: username },
       });
-      const userId = resp.data?.data?.user?.id;
+      const users = resp.data?.users || [];
+      const match = users.find((u: any) => u.user?.username?.toLowerCase() === username.toLowerCase());
+      const userId = match?.user?.pk;
       return userId ? String(userId) : null;
     } catch (err: any) {
-      this.logger.warn(`Could not get Instagram user ID for @${username}: ${err.message}`);
+      this.logger.warn(`Could not get Instagram user ID for @${username} via topsearch: ${err.message}`);
       return null;
     }
   }
