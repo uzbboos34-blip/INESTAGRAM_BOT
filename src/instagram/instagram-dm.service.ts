@@ -41,12 +41,13 @@ export class InstagramDmService implements OnModuleInit, OnModuleDestroy {
 
     // Attach Bot Specific Proxy if defined in .env, fallback to first proxy from PROXY_POOL
     let botProxy = this.configService.get<string>('INSTAGRAM_BOT_PROXY');
-    if (botProxy === 'none') {
-      this.logger.log('INSTAGRAM_BOT_PROXY is set to "none". Connecting directly without proxy.');
+    const botProxyNormalized = (botProxy || '').trim().toLowerCase();
+    if (!botProxy || botProxyNormalized === 'none' || botProxyNormalized === '') {
+      this.logger.log('INSTAGRAM_BOT_PROXY is not set or "none". Connecting directly without proxy.');
       botProxy = undefined;
-    } else if (!botProxy) {
+    } else {
       const envPool = this.configService.get<string>('PROXY_POOL');
-      if (envPool) {
+      if (!botProxy && envPool) {
         const proxies = envPool.split(',').map(item => item.trim()).filter(Boolean);
         if (proxies.length > 0) {
           const firstProxy = proxies[0];
@@ -73,6 +74,8 @@ export class InstagramDmService implements OnModuleInit, OnModuleDestroy {
       } catch (agentErr: any) {
         this.logger.error(`Failed to configure HttpsProxyAgent: ${agentErr.message}`);
       }
+    } else {
+      this.logger.log('Connecting to Instagram directly (no proxy).');
     }
 
     try {
