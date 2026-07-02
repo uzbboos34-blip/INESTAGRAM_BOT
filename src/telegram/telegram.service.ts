@@ -1,8 +1,9 @@
-import { Injectable, OnModuleInit, OnModuleDestroy, Logger } from '@nestjs/common';
+import { Injectable, Inject, forwardRef, OnModuleInit, OnModuleDestroy, Logger } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { Telegraf, Context, Markup } from 'telegraf';
 import { InstagramService } from '../instagram/instagram.service';
 import { DatabaseService } from '../database/database.service';
+import { InstagramDmService } from '../instagram/instagram-dm.service';
 
 interface CachedMedia {
   type: 'video' | 'image';
@@ -60,6 +61,8 @@ export class TelegramService implements OnModuleInit, OnModuleDestroy {
     private readonly configService: ConfigService,
     private readonly instagramService: InstagramService,
     private readonly databaseService: DatabaseService,
+    @Inject(forwardRef(() => InstagramDmService))
+    private readonly instagramDmService: InstagramDmService,
   ) { }
 
   async onModuleInit() {
@@ -196,6 +199,30 @@ export class TelegramService implements OnModuleInit, OnModuleDestroy {
         await ctx.reply('Kesh muvaffaqiyatli tozalandi! ✅ (SQLite va Redis bo\'shatildi)');
       } catch (err: any) {
         await ctx.reply(`Keshni tozalashda xatolik yuz berdi: ${err.message}`);
+      }
+    });
+
+    // Confirm Challenge Code Command
+    this.bot.command('confirm', async (ctx) => {
+      const text = ctx.message.text.trim();
+      const parts = text.split(/\s+/);
+      if (parts.length < 2) {
+        await ctx.reply(
+          "⚠️ *Tasdiqlash kodini kiritish:*\n\n" +
+          "Iltimos, Instagram'dan kelgan 6 xonali kodni yuboring.\n" +
+          "Masalan:\n`/confirm 123456`",
+          { parse_mode: 'Markdown' }
+        );
+        return;
+      }
+
+      const code = parts[1].trim();
+      await ctx.reply('⏳ Instagram tasdiqlash kodi tekshirilmoqda, iltimos kuting...');
+      const success = await this.instagramDmService.verifyChallenge(code);
+      if (success) {
+        await ctx.reply('✅ Instagram akkaunt muvaffaqiyatli tasdiqlandi va bot ishga tushdi!');
+      } else {
+        await ctx.reply('❌ Kod tasdiqlanmadi yoki muddati o\'tgan. Iltimos, qayta urunib ko\'ring.');
       }
     });
 

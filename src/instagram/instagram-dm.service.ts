@@ -1,6 +1,6 @@
 import { Injectable, Inject, forwardRef, OnModuleInit, OnModuleDestroy, Logger } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
-import { IgApiClient } from 'instagram-private-api';
+import { IgApiClient, IgCheckpointError } from 'instagram-private-api';
 import { DatabaseService } from '../database/database.service';
 import { TelegramService } from '../telegram/telegram.service';
 
@@ -113,7 +113,39 @@ export class InstagramDmService implements OnModuleInit, OnModuleDestroy {
       this.startPolling();
 
     } catch (err: any) {
-      this.logger.error(`Failed to initialize Instagram DM Client: ${err.message}`);
+      if (err instanceof IgCheckpointError) {
+        this.logger.warn('Instagram login requires verification (Checkpoint). Requesting verification code...');
+        try {
+          await this.ig.challenge.auto(true);
+          this.logger.log('Verification code has been requested and sent! Please check your Email or SMS.');
+          this.logger.log('Use command: /confirm <verification_code> in the Telegram bot to finalize the connection.');
+        } catch (challengeErr: any) {
+          this.logger.error(`Failed to request challenge code: ${challengeErr.message}`);
+        }
+      } else {
+        this.logger.error(`Failed to initialize Instagram DM Client: ${err.message}`);
+      }
+    }
+  }
+
+  async verifyChallenge(code: string): Promise<boolean> {
+    try {
+      this.logger.log(`Attempting to verify checkpoint with code: ${code}`);
+      await this.ig.challenge.sendSecurityCode(code);
+      this.logger.log('Checkpoint verified successfully! Session initialized.');
+      this.isLoggedIn = true;
+
+      // Save serialized session state back to database
+      const serialized = await this.ig.state.serialize();
+      await this.databaseService.saveSession(JSON.stringify(serialized));
+      this.logger.log('Successfully saved session state to database SQLite.');
+
+      // Start Polling DMs
+      this.startPolling();
+      return true;
+    } catch (err: any) {
+      this.logger.error(`Failed to verify checkpoint code: ${err.message}`);
+      return false;
     }
   }
 
