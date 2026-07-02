@@ -82,15 +82,16 @@ export class InstagramDmService implements OnModuleInit, OnModuleDestroy {
         this.logger.log('Loading Instagram Bot Cookie from configuration...');
         await this.loadCookieString(botCookie);
         try {
-          const currentUser = await this.ig.account.currentUser();
-          this.logger.log(`Successfully logged in using cookie! Logged in as: @${currentUser.username}`);
+          // Bypassing active endpoint validation during startup to prevent block list checks.
+          // The cookie will be verified naturally when the polling worker requests directInbox.
+          this.logger.log(`Successfully loaded cookie string into client session.`);
           this.isLoggedIn = true;
 
           // Save the serialized session so next restarts read from DB
           const serialized = await this.ig.state.serialize();
           await this.databaseService.saveSession(JSON.stringify(serialized));
         } catch (cookieErr: any) {
-          this.logger.warn(`Configured INSTAGRAM_BOT_COOKIE failed/expired: ${cookieErr.message}. Trying DB or Login...`);
+          this.logger.warn(`Configured INSTAGRAM_BOT_COOKIE loading failed: ${cookieErr.message}. Trying DB or Login...`);
         }
       }
 
