@@ -1,15 +1,17 @@
 import { Injectable, Inject, forwardRef, OnModuleInit, OnModuleDestroy, Logger } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
-import { IgApiClient, IgCheckpointError } from 'instagram-private-api';
 import { DatabaseService } from '../database/database.service';
 import { TelegramService } from '../telegram/telegram.service';
+import axios, { AxiosInstance } from 'axios';
 
 @Injectable()
 export class InstagramDmService implements OnModuleInit, OnModuleDestroy {
   private readonly logger = new Logger(InstagramDmService.name);
-  private ig: IgApiClient;
-  private isLoggedIn = false;
   private pollInterval: NodeJS.Timeout | null = null;
+  private cookieString: string = '';
+  private csrfToken: string = '';
+  private dsUserId: string = '';
+  private httpClient: AxiosInstance;
 
   constructor(
     private readonly configService: ConfigService,
@@ -19,204 +21,55 @@ export class InstagramDmService implements OnModuleInit, OnModuleDestroy {
   ) {}
 
   async onModuleInit() {
-    const username = this.configService.get<string>('INSTAGRAM_BOT_USERNAME');
-    const password = this.configService.get<string>('INSTAGRAM_BOT_PASSWORD');
-
-    if (!username || !password || username.includes('YOUR_INSTAGRAM_BOT')) {
-      this.logger.warn('INSTAGRAM_BOT_USERNAME or INSTAGRAM_BOT_PASSWORD is not set. Instagram DM Service will not start.');
+    const botCookie = this.configService.get<string>('INSTAGRAM_BOT_COOKIE');
+    if (!botCookie) {
+      this.logger.warn('INSTAGRAM_BOT_COOKIE is not set. Instagram DM Service will not start.');
       return;
     }
 
-    this.ig = new IgApiClient();
+    this.cookieString = botCookie;
 
-    // Override outdated constants to bypass "unsupported_version" blocks
-    const constants = this.ig.state.constants as any;
-    constants.APP_VERSION = '320.0.0.42.101';
-    constants.APP_VERSION_CODE = '372011650';
+    // Parse key values from cookie string
+    this.csrfToken = this.parseCookieValue(botCookie, 'csrftoken');
+    this.dsUserId = this.parseCookieValue(botCookie, 'ds_user_id');
 
-    this.ig.state.generateDevice(username);
-    // Override to a modern Android 12 device and build matching Instagram v320
-    this.ig.state.deviceString = '31/12; 480dpi; 1080x2340; samsung; SM-S901B; galaxy-s22; samsungexynos2200';
-    this.ig.state.build = '320.0.0.42.101';
-
-    // Attach Bot Specific Proxy if defined in .env, fallback to first proxy from PROXY_POOL
-    let botProxy = this.configService.get<string>('INSTAGRAM_BOT_PROXY');
-    const botProxyNormalized = (botProxy || '').trim().toLowerCase();
-    if (!botProxy || botProxyNormalized === 'none' || botProxyNormalized === '') {
-      this.logger.log('INSTAGRAM_BOT_PROXY is not set or "none". Connecting directly without proxy.');
-      botProxy = undefined;
-    } else {
-      const envPool = this.configService.get<string>('PROXY_POOL');
-      if (!botProxy && envPool) {
-        const proxies = envPool.split(',').map(item => item.trim()).filter(Boolean);
-        if (proxies.length > 0) {
-          const firstProxy = proxies[0];
-          botProxy = firstProxy.startsWith('http') ? firstProxy : `http://${firstProxy}`;
-          this.logger.log(`INSTAGRAM_BOT_PROXY not set. Falling back to first proxy from PROXY_POOL: ${botProxy.split('@')[1] || botProxy}`);
-        }
-      }
+    if (!this.csrfToken || !this.dsUserId) {
+      this.logger.warn('Could not parse csrftoken or ds_user_id from INSTAGRAM_BOT_COOKIE. Service will not start.');
+      return;
     }
 
-    if (botProxy) {
-      if (!botProxy.startsWith('http://') && !botProxy.startsWith('https://')) {
-        botProxy = `http://${botProxy}`;
-      }
+    this.logger.log(`Loaded bot cookie for user ID: ${this.dsUserId}`);
 
-      const safeLogProxy = botProxy.includes('@') ? botProxy.split('@')[1] : botProxy;
-      this.logger.log(`Using proxy for Instagram Bot client: ${safeLogProxy}`);
-      this.ig.state.proxyUrl = botProxy;
+    // Build axios client targeting www.instagram.com web API
+    // Browser sessions (web cookies) work with www.instagram.com but NOT with i.instagram.com
+    this.httpClient = axios.create({
+      baseURL: 'https://www.instagram.com',
+      headers: {
+        'Cookie': this.cookieString,
+        'X-CSRFToken': this.csrfToken,
+        'X-IG-App-ID': '936619743392459',
+        'X-Requested-With': 'XMLHttpRequest',
+        'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36',
+        'Referer': 'https://www.instagram.com/direct/inbox/',
+        'Accept': '*/*',
+        'Accept-Language': 'en-US,en;q=0.9',
+        'Origin': 'https://www.instagram.com',
+      },
+    });
 
-      try {
-        const { HttpsProxyAgent } = require('https-proxy-agent');
-        const agent = new HttpsProxyAgent(botProxy);
-        this.ig.request.defaults = { agent };
-        this.logger.log('Successfully configured HttpsProxyAgent for authenticated proxy tunneling.');
-      } catch (agentErr: any) {
-        this.logger.error(`Failed to configure HttpsProxyAgent: ${agentErr.message}`);
-      }
-    } else {
-      this.logger.log('Connecting to Instagram directly (no proxy).');
-    }
-
+    // Verify the session by making a test request
     try {
-      // 1. Try to load saved session from database to avoid fresh logins and blocks
-      const savedSession = await this.databaseService.getSession();
-      if (savedSession) {
-        this.logger.log('Restoring Instagram session from database SQLite...');
-        try {
-          await this.ig.state.deserialize(JSON.parse(savedSession));
-          // Quick health check - try accessing the inbox
-          await this.ig.feed.directInbox().items();
-          this.logger.log(`Successfully recovered session from database.`);
-          this.isLoggedIn = true;
-        } catch (sessionErr: any) {
-          this.logger.warn(`Saved session invalid or expired: ${sessionErr.message}. Falling back to fresh login.`);
-        }
-      }
-
-      // 2. Perform fresh mobile login with username + password
-      if (!this.isLoggedIn) {
-        this.logger.log(`Attempting fresh Instagram mobile login for @${username}...`);
-        await this.ig.simulate.preLoginFlow();
-        const loggedInUser = await this.ig.account.login(username, password);
-        this.logger.log(`Fresh login successful! Logged in as: @${loggedInUser.username}`);
-        this.isLoggedIn = true;
-
-        process.nextTick(async () => {
-          try { await this.ig.simulate.postLoginFlow(); } catch (e) {}
-        });
-
-        // Save serialized session state back to database
-        const serialized = await this.ig.state.serialize();
-        await this.databaseService.saveSession(JSON.stringify(serialized));
-        this.logger.log('Successfully saved mobile session to database SQLite.');
-      }
-
-      // 3. Start Polling DMs
-      this.startPolling();
-
+      this.logger.log('Verifying Instagram web session...');
+      const testResp = await this.httpClient.get('/api/v1/accounts/current_user/', {
+        params: { edit: true },
+      });
+      const username = testResp.data?.user?.username;
+      this.logger.log(`Instagram web session verified! Logged in as: @${username}`);
     } catch (err: any) {
-      const constructorName = err?.constructor?.name || 'UnknownError';
-      const errorMessage = err?.message || '';
-      const isCheckpoint = 
-        err instanceof IgCheckpointError || 
-        constructorName === 'IgCheckpointError' || 
-        errorMessage.includes('checkpoint_required');
-
-      this.logger.warn(`Instagram DM Client initialization encountered an error:`);
-      this.logger.warn(`- Error class: ${constructorName}`);
-      this.logger.warn(`- Error message: ${errorMessage}`);
-      if (err.response && err.response.body) {
-        this.logger.warn(`- Error response body: ${JSON.stringify(err.response.body)}`);
-      }
-      this.logger.warn(`- Detected as checkpoint: ${isCheckpoint}`);
-
-      if (isCheckpoint) {
-        this.logger.warn('Instagram login requires verification (Checkpoint). Requesting verification code...');
-        try {
-          let hasApiPath = false;
-          // Manually extract and assign checkpoint details from error response body
-          if (err.response && err.response.body) {
-            if (err.response.body.challenge) {
-              this.ig.state.checkpoint = err.response.body;
-              if (err.response.body.challenge.api_path) {
-                hasApiPath = true;
-              }
-            } else {
-              this.ig.state.checkpoint = { challenge: err.response.body } as any;
-              if (err.response.body.api_path) {
-                hasApiPath = true;
-              }
-            }
-          }
-
-          if (hasApiPath) {
-            // Trigger code delivery automatically
-            const challengeInfo = await this.ig.challenge.auto(true);
-            this.logger.log(`Challenge auto result: ${JSON.stringify(challengeInfo)}`);
-            this.logger.log('Verification code has been requested and sent! Please check your Email or SMS.');
-            this.logger.log('Use command: /confirm <verification_code> in the Telegram bot to finalize the connection.');
-          } else {
-            const checkpointUrl = err.response?.body?.checkpoint_url || '';
-            this.logger.error(`Checkpoint requires manual verification. No API path was provided by Instagram.`);
-            if (checkpointUrl) {
-              this.logger.error(`Please open this URL in your browser to verify the login attempt: ${checkpointUrl}`);
-            }
-          }
-        } catch (challengeErr: any) {
-          this.logger.error(`Failed to request challenge code: ${challengeErr.message}`);
-        }
-      } else {
-        this.logger.error(`Failed to initialize Instagram DM Client: ${err.stack || err.message}`);
-      }
+      this.logger.warn(`Session verification failed: ${err.message}. Polling will start anyway.`);
     }
-  }
 
-  async verifyChallenge(code: string): Promise<boolean> {
-    try {
-      this.logger.log(`Attempting to verify checkpoint with code: ${code}`);
-      await this.ig.challenge.sendSecurityCode(code);
-      this.logger.log('Checkpoint verified successfully! Session initialized.');
-      this.isLoggedIn = true;
-
-      // Save serialized session state back to database
-      const serialized = await this.ig.state.serialize();
-      await this.databaseService.saveSession(JSON.stringify(serialized));
-      this.logger.log('Successfully saved session state to database SQLite.');
-
-      // Start Polling DMs
-      this.startPolling();
-      return true;
-    } catch (err: any) {
-      this.logger.error(`Failed to verify checkpoint code: ${err.message}`);
-      return false;
-    }
-  }
-
-  private async loadCookieString(cookieString: string) {
-    const { Cookie } = require('tough-cookie');
-    const cookies = cookieString.split(';').map(c => c.trim()).filter(Boolean);
-    // The mobile API sends requests to i.instagram.com, so we must set cookies
-    // for both domains — otherwise the cookie jar is empty when API calls are made.
-    const cookieUrls = ['https://i.instagram.com', 'https://instagram.com'];
-    for (const c of cookies) {
-      for (const url of cookieUrls) {
-        const cookie = Cookie.parse(c);
-        if (cookie) {
-          cookie.domain = '.instagram.com';
-          cookie.hostOnly = false;
-          await this.ig.state.cookieJar.setCookie(cookie.toString(), url);
-          if (cookie.key === 'ig_did') {
-            const igDidValue = cookie.value;
-            this.ig.state.uuid = igDidValue;
-            this.ig.state.phoneId = igDidValue;
-            this.ig.state.deviceId = `android-${igDidValue}`;
-            this.ig.state.adid = igDidValue;
-            this.logger.log(`Aligned device identifiers with cookie ig_did: ${igDidValue}`);
-          }
-        }
-      }
-    }
+    this.startPolling();
   }
 
   onModuleDestroy() {
@@ -227,56 +80,57 @@ export class InstagramDmService implements OnModuleInit, OnModuleDestroy {
     }
   }
 
+  private parseCookieValue(cookieString: string, key: string): string {
+    const match = cookieString.match(new RegExp(`(?:^|;\\s*)${key}=([^;]*)`));
+    return match ? decodeURIComponent(match[1]) : '';
+  }
+
   private startPolling() {
-    // 30 seconds interval to mimic human-like speed and bypass rate-limiting blocks
     const intervalMs = 30000;
     this.pollInterval = setInterval(async () => {
-      if (!this.isLoggedIn) return;
       try {
         await this.pollDirectInbox();
       } catch (err: any) {
-        this.logger.warn(`Error during Instagram DM polling: ${err.message}`);
-        // Handle session validation failures (401, Login Required, etc.)
-        if (err.message?.includes('login_required') || err.message?.includes('401')) {
-          this.logger.warn('Session has expired. Resetting login flag for re-auth on next cycle.');
-          this.isLoggedIn = false;
-        }
+        this.logger.warn(`Error during Instagram DM polling: ${err.response?.status || ''} ${err.message}`);
       }
     }, intervalMs);
     this.logger.log(`Instagram DM polling initiated successfully (interval: ${intervalMs / 1000}s)`);
   }
 
   private async pollDirectInbox() {
-    const inboxFeed = this.ig.feed.directInbox();
-    const threads = await inboxFeed.items();
+    const resp = await this.httpClient.get('/api/v1/direct_v2/inbox/', {
+      params: {
+        visual_message_return_type: 'unseen',
+        thread_message_limit: '10',
+        persistentBadging: 'true',
+        limit: '20',
+      },
+    });
+
+    const threads: any[] = resp.data?.inbox?.threads || [];
 
     for (const thread of threads) {
-      const threadId = thread.thread_id;
-      // Get participant (usually index 0 since we are in 1-on-1 DM)
+      const threadId: string = thread.thread_id;
       const otherUser = thread.users?.[0];
       if (!otherUser) continue;
 
-      const username = otherUser.username.toLowerCase();
-      const items = thread.items || [];
+      const username: string = (otherUser.username || '').toLowerCase();
+      const items: any[] = thread.items || [];
 
       for (const item of items) {
-        const messageId = item.item_id;
+        const messageId: string = item.item_id;
 
         // Ignore messages sent by the bot account itself
-        if (String(item.user_id) === String(this.ig.state.cookieUserId)) {
+        if (String(item.user_id) === String(this.dsUserId)) {
           continue;
         }
 
         // Deduplicate: check if this message was already processed
         const isProcessed = await this.databaseService.isMessageProcessed(messageId);
-        if (isProcessed) {
-          continue;
-        }
+        if (isProcessed) continue;
 
         try {
-          // Process message
           await this.handleInboxMessage(threadId, username, item);
-          // Mark processed in DB to prevent duplicates
           await this.databaseService.markMessageAsProcessed(messageId);
         } catch (err: any) {
           this.logger.error(`Error processing message ${messageId} from @${username}: ${err.message}`);
@@ -290,15 +144,12 @@ export class InstagramDmService implements OnModuleInit, OnModuleDestroy {
 
     // --- CASE 1: Text message containing Verification Code ---
     if (item.item_type === 'text') {
-      const text = item.text.trim();
-      // Match exactly a 4-digit code (e.g. 1948)
+      const text = (item.text || '').trim();
       if (/^\d{4}$/.test(text)) {
         const mapping = await this.databaseService.getMappingByCode(text);
         if (mapping && mapping.instagram_username.toLowerCase() === username) {
-          // Update mapping is_verified = 1 in database
           await this.databaseService.verifyMapping(username);
 
-          // Notify user via Telegram Bot
           await this.telegramService.sendDirectMessage(
             mapping.telegram_chat_id,
             `✅ *Instagram akkauntingiz muvaffaqiyatli bog'landi!*\n\n` +
@@ -306,13 +157,11 @@ export class InstagramDmService implements OnModuleInit, OnModuleDestroy {
             { parse_mode: 'Markdown' }
           );
 
-          // Send confirmation text back in Instagram DM
-          await this.ig.entity.directThread(threadId).broadcastText(
+          await this.sendInstagramMessage(threadId,
             `Tasdiqlandi! ✅ Akkauntingiz Telegram botga muvaffaqiyatli bog'landi. Endi bemalol video share qilishingiz mumkin.`
           );
         } else {
-          // Mismatch or expired code
-          await this.ig.entity.directThread(threadId).broadcastText(
+          await this.sendInstagramMessage(threadId,
             `Tasdiqlash kodi topilmadi yoki xato. Iltimos, Telegram botdan kodni tekshiring. ❌`
           );
         }
@@ -320,7 +169,6 @@ export class InstagramDmService implements OnModuleInit, OnModuleDestroy {
     }
     // --- CASE 2: Shared Reel or Post (clip or media_share) ---
     else if (item.item_type === 'clip' || item.item_type === 'media_share') {
-      // Check if user has verified status
       const mapping = await this.databaseService.getMappingByUsername(username);
       if (mapping && mapping.is_verified === 1) {
         let shortcode = '';
@@ -332,18 +180,15 @@ export class InstagramDmService implements OnModuleInit, OnModuleDestroy {
 
         if (shortcode) {
           this.logger.log(`Shared Reel/Post detected from verified user @${username}: shortcode ${shortcode}`);
-          
-          // Send acknowledgement message in Instagram DM
-          await this.ig.entity.directThread(threadId).broadcastText(
+
+          await this.sendInstagramMessage(threadId,
             `Videongiz qabul qilindi. Telegram'ga yuborilmoqda... ⏳`
           );
 
-          // Call the delivery pipeline
           await this.telegramService.deliverSharedMedia(mapping.telegram_chat_id, shortcode, username);
         }
       } else {
-        // User not verified - prompt them with instructions in Instagram DM
-        await this.ig.entity.directThread(threadId).broadcastText(
+        await this.sendInstagramMessage(threadId,
           `Salom! 📥 Ushbu videoni Telegram botingizga yuklash uchun avval akkauntingizni bog'lashingiz kerak.\n\n` +
           `Buning uchun:\n` +
           `1️⃣ Telegram botimizga kiring.\n` +
@@ -351,6 +196,21 @@ export class InstagramDmService implements OnModuleInit, OnModuleDestroy {
           `3️⃣ Bot bergan 4-xonali tasdiqlash kodini bu yerga (Direct'ga) yozib yuboring.`
         );
       }
+    }
+  }
+
+  private async sendInstagramMessage(threadId: string, text: string): Promise<void> {
+    try {
+      const params = new URLSearchParams({ text });
+      await this.httpClient.post(
+        `/api/v1/direct_v2/threads/${threadId}/broadcast/text/`,
+        params.toString(),
+        {
+          headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+        }
+      );
+    } catch (err: any) {
+      this.logger.warn(`Failed to send Instagram DM reply: ${err.message}`);
     }
   }
 }

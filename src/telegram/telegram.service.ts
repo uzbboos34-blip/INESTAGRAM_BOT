@@ -216,14 +216,8 @@ export class TelegramService implements OnModuleInit, OnModuleDestroy {
         return;
       }
 
-      const code = parts[1].trim();
-      await ctx.reply('⏳ Instagram tasdiqlash kodi tekshirilmoqda, iltimos kuting...');
-      const success = await this.instagramDmService.verifyChallenge(code);
-      if (success) {
-        await ctx.reply('✅ Instagram akkaunt muvaffaqiyatli tasdiqlandi va bot ishga tushdi!');
-      } else {
-        await ctx.reply('❌ Kod tasdiqlanmadi yoki muddati o\'tgan. Iltimos, qayta urunib ko\'ring.');
-      }
+      // /confirm command is no longer needed - bot uses cookie-based auth
+      await ctx.reply('ℹ️ Bu buyruq endi ishlatilmaydi. Bot cookie orqali avtomatik ulanadi.');
     });
 
     // Callback Query Handler for Inline Buttons
