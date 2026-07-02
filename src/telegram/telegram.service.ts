@@ -57,6 +57,9 @@ export class TelegramService implements OnModuleInit, OnModuleDestroy {
   // 5 concurrent tasks: optimal balance between download speed and API stability
   private readonly executionQueue = new TaskQueue(5);
 
+  // Track users who are in the middle of the Instagram linking flow
+  private readonly awaitingInstagramUsername = new Map<number | string, boolean>();
+
   constructor(
     private readonly configService: ConfigService,
     private readonly instagramService: InstagramService,
@@ -142,54 +145,38 @@ export class TelegramService implements OnModuleInit, OnModuleDestroy {
 
   private setupHandlers() {
     // Start and help commands
-    this.bot.start((ctx) => this.sendWelcomeMessage(ctx));
+    this.bot.start(async (ctx) => {
+      const chatId = ctx.chat?.id;
+      const firstName = ctx.from?.first_name || 'foydalanuvchi';
+      await ctx.reply(
+        `Salom, *${firstName}*! 👋
+
+` +
+        `🎬 *InstaDownload Bot*ga xush kelibsiz!\n\n` +
+        `Bu bot orqali Instagram Reels va postlarni Telegram'ga yuklab olishingiz mumkin.\n\n` +
+        `Boshlash uchun Instagram akkauntingizni ulang:`,
+        {
+          parse_mode: 'Markdown',
+          ...Markup.inlineKeyboard([
+            [Markup.button.callback('✅ Ha, ulash', 'link_instagram')],
+            [Markup.button.callback('❌ Keyin', 'skip_link')],
+          ]),
+        }
+      );
+    });
     this.bot.help((ctx) => this.sendWelcomeMessage(ctx));
 
-    // Link Instagram Account Command
+    // Link Instagram Account Command — also handles plain text username input
     this.bot.command('link', async (ctx) => {
-      const text = ctx.message.text.trim();
-      const parts = text.split(/\s+/);
-      if (parts.length < 2) {
-        await ctx.reply(
-          "⚠️ *Instagram akkauntni bog'lash:*\n\n" +
-          "Iltimos, Instagram profilingiz nomini (username) yuboring.\n" +
-          "Masalan:\n`/link profilingiz_nomi`\n\n" +
-          "Yoki:\n`/link @profilingiz_nomi`",
-          { parse_mode: 'Markdown' }
-        );
-        return;
+      if (ctx.chat?.id) {
+        this.awaitingInstagramUsername.set(ctx.chat.id, true);
       }
-
-      const instagramUsername = parts[1].replace(/^@/, '').toLowerCase().trim();
-      if (!instagramUsername || instagramUsername.length < 1) {
-        await ctx.reply("❌ Yaroqsiz Instagram foydalanuvchi nomi.");
-        return;
-      }
-
-      // Generate a random 4-digit code
-      const verificationCode = Math.floor(1000 + Math.random() * 9000).toString();
-
-      try {
-        await this.databaseService.createOrUpdateMapping(
-          instagramUsername,
-          ctx.chat.id.toString(),
-          verificationCode
-        );
-
-        const botUsername = this.configService.get<string>('INSTAGRAM_BOT_USERNAME') || 'Instagram_Bot';
-        const instructionText =
-          `🔗 *Instagram akkauntni bog'lash:*\n\n` +
-          `Sizning Instagram nikingiz: *@${instagramUsername}*\n` +
-          `Tasdiqlash kodi: \`${verificationCode}\`\n\n` +
-          `Akkauntingizni tasdiqlash uchun quyidagi amallarni bajaring:\n` +
-          `1️⃣ Instagram'da *@${botUsername}* akkaunti Direct (DM)iga kiring.\n` +
-          `2️⃣ Unga faqatgina mana shu \`${verificationCode}\` kodini yozib yuboring.\n\n` +
-          `Tizim kodni qabul qilgach, ushbu Telegram bot sizga tasdiqlash xabarini yuboradi.`;
-
-        await ctx.reply(instructionText, { parse_mode: 'Markdown' });
-      } catch (err: any) {
-        await ctx.reply(`❌ Akkauntni bog'lashda xatolik yuz berdi: ${err.message}`);
-      }
+      await ctx.reply(
+        `📸 *Instagram akkauntingizni ulash*\n\n` +
+        `Iltimos, Instagram *username* ingizni yozing:\n` +
+        `(Masalan: \`instagram_username\`)`,
+        { parse_mode: 'Markdown' }
+      );
     });
 
     // Clear Cache Command (For developer testing)
@@ -225,7 +212,25 @@ export class TelegramService implements OnModuleInit, OnModuleDestroy {
       const data = (ctx.callbackQuery as any).data;
       if (!data) return;
 
-      if (data === 'del') {
+      if (data === 'link_instagram') {
+        if (ctx.chat?.id) {
+          this.awaitingInstagramUsername.set(ctx.chat.id, true);
+        }
+        await ctx.reply(
+          `📸 *Instagram usernameingizni kiriting:*\n\n` +
+          `Bot sizning Instagram Direct'ingizga avtomatik tarzda tasdiqlash kodini yuboradi.\n\n` +
+          `Faqatgina profilingiz nomini yozing (masalan: \`instagram_username\`):`,
+          { parse_mode: 'Markdown' }
+        );
+        await ctx.answerCbQuery();
+      } else if (data === 'skip_link') {
+        await ctx.reply(
+          `Tushunarli! 😊\n\n` +
+          `Instagram profilingizni keyinroq bog'lash uchun /link buyrug'ini yuborishingiz mumkin.\n` +
+          `Hozircha menga Instagram Reels/Post havolalarini yuboring, ularni yuklab beraman.`
+        );
+        await ctx.answerCbQuery();
+      } else if (data === 'del') {
         try {
           await ctx.deleteMessage();
           await ctx.answerCbQuery('Fayl o\'chirildi! 🗑️');
@@ -303,8 +308,92 @@ export class TelegramService implements OnModuleInit, OnModuleDestroy {
 
     // Handle text messages (Instagram URLs)
     this.bot.on('text', async (ctx) => {
-      if (!ctx.chat) return;
+      const chatId = ctx.chat?.id;
+      if (!chatId) return;
       const text = ctx.message.text.trim();
+
+      // Check if user is in the middle of linking their Instagram account
+      if (this.awaitingInstagramUsername.get(chatId)) {
+        // If they sent a command, abort the username flow and process the command instead
+        if (text.startsWith('/')) {
+          this.awaitingInstagramUsername.delete(chatId);
+        } else {
+          const usernameClean = text.replace(/^@/, '').toLowerCase().trim();
+          if (!usernameClean || usernameClean.length < 1) {
+            await ctx.reply("❌ Yaroqsiz Instagram foydalanuvchi nomi. Qaytadan kiriting:");
+            return;
+          }
+
+          const statusMsg = await ctx.reply("🔍 Instagram profil qidirilmoqda va tasdiqlash kodi yuborilmoqda, iltimos kuting...");
+
+          try {
+            const targetUserId = await this.instagramDmService.getUserIdByUsername(usernameClean);
+            if (!targetUserId) {
+              await ctx.telegram.editMessageText(
+                chatId,
+                statusMsg.message_id,
+                undefined,
+                `❌ Instagram'da *@${usernameClean}* profilini topib bo'lmadi.\n` +
+                `Iltimos, profilingiz nomi (username) xatosiz ekanligini tekshirib qaytadan yuboring.`,
+                { parse_mode: 'Markdown' }
+              );
+              return;
+            }
+
+            const verificationCode = Math.floor(1000 + Math.random() * 9000).toString();
+
+            // Save to Redis / SQLite mapping
+            await this.databaseService.createOrUpdateMapping(
+              usernameClean,
+              chatId.toString(),
+              verificationCode
+            );
+
+            // Send DM to Instagram user via the bot account
+            const botUsername = this.configService.get<string>('INSTAGRAM_BOT_USERNAME') || 'Instagram_Bot';
+            const dmSent = await this.instagramDmService.sendDmToNewUser(
+              targetUserId,
+              `Salom! 📥 Sizning Telegram botimizni bog'lash uchun tasdiqlash kodingiz: ${verificationCode}\n\n` +
+              `Akkauntni bog'lashni yakunlash uchun iltimos shu kodni ushbu Direct suhbatga yozib yuboring.`
+            );
+
+            this.awaitingInstagramUsername.delete(chatId);
+
+            if (dmSent) {
+              await ctx.telegram.editMessageText(
+                chatId,
+                statusMsg.message_id,
+                undefined,
+                `🚀 *Tasdiqlash kodi Instagram Direct'ingizga yuborildi!*\n\n` +
+                `Instagram'da *@${usernameClean}* profilingiz Direct (DM) qutisiga kiring.\n` +
+                `Botimiz yuborgan \`${verificationCode}\` kodini o'sha yerda (Instagram Direct'da) qaytadan yozib yuboring.`,
+                { parse_mode: 'Markdown' }
+              );
+            } else {
+              await ctx.telegram.editMessageText(
+                chatId,
+                statusMsg.message_id,
+                undefined,
+                `⚠️ *Direct xabar yuborib bo'lmadi:*\n\n` +
+                `Instagram *@${usernameClean}* profilingizga avtomatik Direct xabar yuborish imkoni bo'lmadi. (Ehtimol, sizda Direct yopiq yoki bot akkaunti cheklangan).\n\n` +
+                `*Muammo yo'q!* Akkauntni qo'lda bog'lashingiz mumkin:\n` +
+                `1️⃣ Instagram'da *@${botUsername}* akkauntiga Direct'dan kirib istalgan biror narsa (masalan: "salom") deb yozing.\n` +
+                `2️⃣ Keyin ushbu Telegram botga qaytib, qaytadan profilingiz nomini yuboring.`,
+                { parse_mode: 'Markdown' }
+              );
+            }
+          } catch (err: any) {
+            this.awaitingInstagramUsername.delete(chatId);
+            await ctx.telegram.editMessageText(
+              chatId,
+              statusMsg.message_id,
+              undefined,
+              `❌ Xatolik yuz berdi: ${err.message}`
+            );
+          }
+          return;
+        }
+      }
 
       if (this.instagramService.isValidUrl(text)) {
         const shortcode = this.instagramService.extractShortcode(text);

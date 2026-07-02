@@ -85,8 +85,46 @@ export class InstagramDmService implements OnModuleInit, OnModuleDestroy {
     return match ? decodeURIComponent(match[1]) : '';
   }
 
+  // Get Instagram user's numeric ID from their username
+  async getUserIdByUsername(username: string): Promise<string | null> {
+    try {
+      const resp = await this.httpClient.get('/api/v1/users/web_profile_info/', {
+        params: { username },
+      });
+      const userId = resp.data?.data?.user?.id;
+      return userId ? String(userId) : null;
+    } catch (err: any) {
+      this.logger.warn(`Could not get Instagram user ID for @${username}: ${err.message}`);
+      return null;
+    }
+  }
+
+  // Send a DM to any Instagram user by their numeric user ID (creates new thread)
+  async sendDmToNewUser(instagramUserId: string, text: string): Promise<boolean> {
+    try {
+      const { v4: uuidv4 } = require('uuid');
+      const clientContext = uuidv4().replace(/-/g, '');
+      const params = new URLSearchParams({
+        recipient_users: `[[${instagramUserId}]]`,
+        text,
+        client_context: clientContext,
+        mutation_token: clientContext,
+      });
+      await this.httpClient.post(
+        '/api/v1/direct_v2/threads/broadcast/text/',
+        params.toString(),
+        { headers: { 'Content-Type': 'application/x-www-form-urlencoded' } }
+      );
+      this.logger.log(`Sent DM to Instagram user ID ${instagramUserId}`);
+      return true;
+    } catch (err: any) {
+      this.logger.warn(`Failed to send DM to user ${instagramUserId}: ${err.response?.status} ${err.message}`);
+      return false;
+    }
+  }
+
   private startPolling() {
-    const intervalMs = 30000;
+    const intervalMs = 15000;
     this.pollInterval = setInterval(async () => {
       try {
         await this.pollDirectInbox();
