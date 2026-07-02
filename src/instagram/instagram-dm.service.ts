@@ -126,12 +126,22 @@ export class InstagramDmService implements OnModuleInit, OnModuleDestroy {
   }
 
   private startPolling() {
-    const intervalMs = 15000;
+    const intervalMs = 60000; // Increased to 60 seconds to avoid Instagram bot detection
     this.pollInterval = setInterval(async () => {
       try {
         await this.pollDirectInbox();
       } catch (err: any) {
-        this.logger.warn(`Error during Instagram DM polling: ${err.response?.status || ''} ${err.message}`);
+        const status = err.response?.status;
+        this.logger.warn(`Error during Instagram DM polling: ${status || ''} ${err.message}`);
+        
+        // If session is expired, blocked, or invalid (400, 401, 403), stop polling to prevent account damage
+        if (status === 400 || status === 401 || status === 403) {
+          this.logger.error('Instagram session is invalid, expired or blocked. Stopping DM polling. Please update INSTAGRAM_BOT_COOKIE.');
+          if (this.pollInterval) {
+            clearInterval(this.pollInterval);
+            this.pollInterval = null;
+          }
+        }
       }
     }, intervalMs);
     this.logger.log(`Instagram DM polling initiated successfully (interval: ${intervalMs / 1000}s)`);
